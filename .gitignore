@@ -1,0 +1,25 @@
+# Credentials are provisioned onto the device at runtime and stored in NVS. None
+# of them belong in a commit — see README.md. These patterns are a safety net, not
+# the mechanism.
+secrets.h
+*.local.h
+*.pem
+*.key
+
+# ESP-IDF build output. `sdkconfig` is the machine-local expansion of the tracked
+# `sdkconfig.defaults`; it is regenerated on every configure and must never be the
+# only place a required setting lives.
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+
+# Dependencies resolved by the IDF Component Manager.
+managed_components/
+dependencies.lock
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

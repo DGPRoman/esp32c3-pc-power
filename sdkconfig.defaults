@@ -1,0 +1,19 @@
+# Build configuration this project depends on, kept under version control.
+#
+# `sdkconfig` — the file the build actually reads — is generated from this one plus
+# whatever `idf.py menuconfig` last wrote, and is git-ignored because it is
+# machine-local and enormous. The rule that keeps that safe: deleting `sdkconfig`
+# and reconfiguring must always reproduce a working build. So anything the
+# firmware genuinely needs belongs here, not only in a local `sdkconfig`.
+
+CONFIG_IDF_TARGET="esp32c3"
+
+# The SuperMini-family boards have no USB-to-UART bridge; the C3's own USB
+# Serial/JTAG peripheral is the only way in or out. Leaving the default UART0
+# console would send every log line to pins nothing is connected to, which reads
+# as "the board is dead" rather than "the console is misrouted".
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# 4 MB is what these boards ship with. Configuring more than the chip has puts the
+# partition table past the end of flash, which fails at boot rather than at build.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
