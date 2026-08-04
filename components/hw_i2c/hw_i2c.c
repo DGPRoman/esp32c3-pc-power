@@ -44,6 +44,18 @@ enum {
 /** @brief TIME_OUT_VALUE is a five-bit field. */
 #define TIMEOUT_VALUE_MAX 0x1Fu
 
+/**
+ * @brief SCL pulses used to free a bus left mid-transfer.
+ *
+ * Nine, because a byte and its acknowledgement are nine bits: a peripheral
+ * interrupted at any point inside one needs at most that many clocks to finish it and
+ * let go of SDA.
+ */
+#define SCL_RESET_PULSES 9u
+
+/** @brief Budget for the hardware to emit those pulses. They take 90 µs at 100 kHz. */
+#define CLEAR_BUS_TIMEOUT_US 10000u
+
 /*
  * One controller means one set of settings. The bus frequency is kept because the
  * software completion deadline has to scale with it — the same transaction takes
@@ -118,7 +130,54 @@ static void configure_timing(uint32_t bus_hz)
     hw_reg_write(I2C_TO_REG(I2C0), tout | (1u << I2C_TIME_OUT_EN_S));
 }
 
-void hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz)
+/**
+ * @brief Release a bus that something is still holding, and report whether it worked.
+ *
+ * A controller reset mid-transaction leaves the peripheral it was talking to halfway
+ * through a byte, still driving SDA low and waiting for clocks that are never coming.
+ * Nothing about that resolves on its own, and it is not a rare corner: a watchdog
+ * reboot, a brownout, or a flash cycle landing during a display redraw all produce
+ * it. The symptom is worse than a dead bus, because a low SDA reads as an
+ * acknowledgement — a scan reports devices that are not there, and only then does the
+ * bus wedge.
+ *
+ * The C3 does this in silicon. Chips without the feature need the same nine pulses
+ * bit-banged through GPIO with software delays; here it is two fields and a wait,
+ * and the hardware generates the closing stop condition itself.
+ *
+ * @return True if the controller finished. False means SCL itself is held down, which
+ *         is a wiring fault rather than a confused peripheral, and no amount of
+ *         further waiting will change it.
+ */
+static bool clear_bus(void)
+{
+    hw_reg_write(I2C_SCL_SP_CONF_REG(I2C0), (SCL_RESET_PULSES << I2C_SCL_RST_SLV_NUM_S) |
+                                                (1u << I2C_SCL_RST_SLV_EN_S));
+    hw_reg_set_bits(I2C_CTR_REG(I2C0), 1u << I2C_CONF_UPGATE_S);
+
+    /* The hardware clears the enable bit when it is done, so that is the completion
+     * signal — there is no separate status flag to read. */
+    for (uint32_t waited = 0; waited < CLEAR_BUS_TIMEOUT_US; waited++) {
+        if ((hw_reg_read(I2C_SCL_SP_CONF_REG(I2C0)) & (1u << I2C_SCL_RST_SLV_EN_S)) == 0u) {
+            /* A second synchronisation, after the hardware has finished rather than
+             * before it starts. The controller cleared that enable bit itself, behind
+             * the staged register copy the state machine reads from, and without
+             * republishing it the next transaction runs against a stale view and times
+             * out. Found the hard way: the first probe after a bus clear failed. */
+            hw_reg_set_bits(I2C_CTR_REG(I2C0), 1u << I2C_CONF_UPGATE_S);
+            return true;
+        }
+        esp_rom_delay_us(1);
+    }
+
+    /* Stop asking, rather than leaving a state machine running that cannot finish. */
+    hw_reg_clear_bits(I2C_SCL_SP_CONF_REG(I2C0), 1u << I2C_SCL_RST_SLV_EN_S);
+    hw_reg_set_bits(I2C_CTR_REG(I2C0), 1u << I2C_CONF_UPGATE_S);
+
+    return false;
+}
+
+hw_i2c_result_t hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz)
 {
     assert(bus_hz > 0u);
     s_bus_hz = bus_hz;
@@ -170,10 +229,16 @@ void hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz)
      */
     hw_reg_set_bits(I2C_CTR_REG(I2C0), 1u << I2C_CONF_UPGATE_S);
 
-    /* Pins last. Routing them any earlier would attach an unconfigured controller to
-     * the bus, and the first thing the other devices on it would see is a glitch. */
+    /* Pins after the controller. Routing them any earlier would attach an
+     * unconfigured controller to the bus, and the first thing the other devices on it
+     * would see is a glitch. */
     hw_gpio_open_drain_init(sda_pin, I2CEXT0_SDA_OUT_IDX, I2CEXT0_SDA_IN_IDX, true);
     hw_gpio_open_drain_init(scl_pin, I2CEXT0_SCL_OUT_IDX, I2CEXT0_SCL_IN_IDX, true);
+
+    /* And the bus clear after the pins, since the pulses have to reach the wire. This
+     * is the first thing done to the bus, before anything trusts what it reads from
+     * it. */
+    return clear_bus() ? HW_I2C_OK : HW_I2C_BUS_BUSY;
 }
 
 /** @brief Assemble one command word. */

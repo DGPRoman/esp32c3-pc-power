@@ -44,14 +44,22 @@ typedef enum {
 } hw_i2c_result_t;
 
 /**
- * @brief Bring up the I²C controller as a master.
+ * @brief Bring up the I²C controller as a master and free the bus.
+ *
+ * Initialisation ends by clocking the bus clear, because a reset that lands
+ * mid-transaction leaves the peripheral being addressed halfway through a byte and
+ * still holding SDA down. Until that is undone, the bus lies rather than fails: a low
+ * SDA reads as an acknowledgement, so a scan finds devices that do not exist.
  *
  * @param sda_pin GPIO carrying SDA.
  * @param scl_pin GPIO carrying SCL.
  * @param bus_hz  Target SCL frequency. The eight timing counters the hardware
  *                actually wants are derived from it.
+ *
+ * @return ::HW_I2C_OK, or ::HW_I2C_BUS_BUSY if the bus could not be freed — which
+ *         points at SCL being held down, a wiring fault rather than a stuck device.
  */
-void hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz);
+hw_i2c_result_t hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz);
 
 /**
  * @brief Write @p len bytes to the device at 7-bit @p address.
