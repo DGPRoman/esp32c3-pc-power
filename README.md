@@ -115,7 +115,8 @@ Early development. The HTTP contract is not stable yet.
 - [x] Register-level I²C master, bus scan
 - [x] SSD1306 driver — framebuffer, 72×40 geometry
 - [x] 5×7 font and text rendering
-- [ ] Wi-Fi, NVS-backed provisioning
+- [x] Setup-mode access point, credentials in NVS
+- [ ] Provisioning portal, joining a network
 - [ ] HTTP server and authenticated command endpoints
 - [ ] Power pulse output, LED sense, power-state machine
 - [ ] Hub-side integration

@@ -56,6 +56,18 @@ enum {
 /** @brief Budget for the hardware to emit those pulses. They take 90 µs at 100 kHz. */
 #define CLEAR_BUS_TIMEOUT_US 10000u
 
+/** @brief Budget for a lone stop condition, which is a fraction of one bit time. */
+#define STOP_TIMEOUT_US 1000u
+
+/**
+ * @brief How long to wait for the bus to fall idle before starting a transaction.
+ *
+ * A stop condition takes half a bit time — five microseconds at 100 kHz — so this is
+ * two orders of magnitude more than the normal case needs. Anything approaching it
+ * means the bus is held rather than merely finishing.
+ */
+#define BUS_IDLE_TIMEOUT_US 1000u
+
 /*
  * One controller means one set of settings. The bus frequency is kept because the
  * software completion deadline has to scale with it — the same transaction takes
@@ -177,6 +189,52 @@ static bool clear_bus(void)
     return false;
 }
 
+/**
+ * @brief Put a stop condition on the bus, ending any transaction still in progress.
+ *
+ * Clocking the bus free only helps a peripheral that was *driving* SDA. One that was
+ * interrupted while *receiving* holds nothing, and so has nothing to release — it
+ * simply still believes it is inside a transaction. The next address byte then arrives
+ * as data, and it acknowledges it, which is how a scan comes to report a device at an
+ * address where nothing lives.
+ *
+ * A stop condition is what tells every peripheral on the bus that whatever it thought
+ * was happening is over. ESP-IDF's software bus-clear ends with one for exactly this
+ * reason, and whether the C3's hardware version also emits one is not something the
+ * headers say, so it is issued unconditionally: one stop condition at startup against a
+ * failure mode the clock pulses cannot reach.
+ *
+ * Worth being precise about what this did and did not do. It was added while chasing a
+ * scan that reported devices which were not there, and it did not fix that — the cause
+ * turned out to be elsewhere entirely. It is kept because the mode it covers is real
+ * and untested, not because it was ever seen to help.
+ */
+static void emit_stop(void)
+{
+    hw_reg_write(I2C_FIFO_CONF_REG(I2C0),
+                 (1u << I2C_TX_FIFO_RST_S) | (1u << I2C_RX_FIFO_RST_S));
+    hw_reg_write(I2C_FIFO_CONF_REG(I2C0), 0u);
+    hw_reg_write(I2C_INT_CLR_REG(I2C0), UINT32_MAX);
+
+    /* A command list of one. There is no start and no payload — the point is the stop
+     * condition itself, not a transaction to carry it. */
+    hw_reg_write(CMD_REG(0), (uint32_t)OP_STOP << CMD_OP_CODE_S);
+    hw_reg_set_bits(I2C_CTR_REG(I2C0), 1u << I2C_TRANS_START_S);
+
+    for (uint32_t waited = 0; waited < STOP_TIMEOUT_US; waited++) {
+        const uint32_t raw = hw_reg_read(I2C_INT_RAW_REG(I2C0));
+        if ((raw & ((1u << I2C_TRANS_COMPLETE_INT_RAW_S) |
+                    (1u << I2C_TIME_OUT_INT_RAW_S))) != 0u) {
+            break;
+        }
+        esp_rom_delay_us(1);
+    }
+
+    /* Whatever happened, do not leave the verdict behind for the next transaction to
+     * read as its own. */
+    hw_reg_write(I2C_INT_CLR_REG(I2C0), UINT32_MAX);
+}
+
 hw_i2c_result_t hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz)
 {
     assert(bus_hz > 0u);
@@ -235,10 +293,16 @@ hw_i2c_result_t hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz)
     hw_gpio_open_drain_init(sda_pin, I2CEXT0_SDA_OUT_IDX, I2CEXT0_SDA_IN_IDX, true);
     hw_gpio_open_drain_init(scl_pin, I2CEXT0_SCL_OUT_IDX, I2CEXT0_SCL_IN_IDX, true);
 
-    /* And the bus clear after the pins, since the pulses have to reach the wire. This
-     * is the first thing done to the bus, before anything trusts what it reads from
-     * it. */
-    return clear_bus() ? HW_I2C_OK : HW_I2C_BUS_BUSY;
+    /* And the bus recovery after the pins, since the pulses have to reach the wire.
+     * Both halves run before anything is allowed to trust what it reads from the bus:
+     * clocking frees a peripheral that is holding SDA, and the stop condition ends a
+     * transaction one still thinks it is inside. Neither covers the other. */
+    if (!clear_bus()) {
+        return HW_I2C_BUS_BUSY;
+    }
+    emit_stop();
+
+    return HW_I2C_OK;
 }
 
 /** @brief Assemble one command word. */
@@ -265,12 +329,34 @@ static uint32_t completion_timeout_us(size_t bytes)
     return 1000u + (uint32_t)(bit_times * 1000000u / s_bus_hz);
 }
 
+/** @brief Wait for the bus to be idle, bounded by ::BUS_IDLE_TIMEOUT_US. */
+static bool wait_for_idle(void)
+{
+    for (uint32_t waited = 0; waited < BUS_IDLE_TIMEOUT_US; waited++) {
+        if ((hw_reg_read(I2C_SR_REG(I2C0)) & (1u << I2C_BUS_BUSY_S)) == 0u) {
+            return true;
+        }
+        esp_rom_delay_us(1);
+    }
+
+    return false;
+}
+
 /**
  * @brief Run one write transaction, @p frame beginning with the address byte.
  */
 static hw_i2c_result_t run_write(const uint8_t *frame, size_t count)
 {
-    if (hw_reg_read(I2C_SR_REG(I2C0)) & (1u << I2C_BUS_BUSY_S)) {
+    /*
+     * Wait for the bus rather than refusing it. A transaction is reported complete as
+     * soon as its flag is raised, but the stop condition that ends it is still going out
+     * on the wire for another half bit time after that — so BUS_BUSY immediately
+     * afterwards is the previous transfer finishing normally, not a fault. Treating it
+     * as one made every second probe of a bus scan fail. ESP-IDF spins on the same bit
+     * for the same reason; the difference here is a bound, so a genuinely held bus is
+     * reported instead of hanging.
+     */
+    if (!wait_for_idle()) {
         return HW_I2C_BUS_BUSY;
     }
 
@@ -325,10 +411,20 @@ static hw_i2c_result_t run_write(const uint8_t *frame, size_t count)
         esp_rom_delay_us(1);
     }
 
-    if (result != HW_I2C_OK) {
-        /* Reset the state machine after any failure. A controller stopped partway
-         * through still believes it holds the bus, and every later transaction would
-         * be refused as busy — one bad device would take the bus down permanently. */
+    /*
+     * Reset the state machine only when the controller is actually stuck. A timeout or a
+     * lost arbitration leaves it partway through a transaction, still believing it holds
+     * the bus, and every later transfer would be refused as busy — one unresponsive
+     * device would take the bus down permanently.
+     *
+     * A NACK is not that. The hardware finishes the transaction itself, stop condition
+     * included, and leaves the state machine idle; ESP-IDF's own driver resets nothing
+     * on a NACK for that reason. Doing it anyway was actively harmful here: a bus scan
+     * NACKs on every empty address, and each reset can raise a completion flag late
+     * enough for the *next* transaction to clear the register, start, and immediately
+     * read that flag as its own — reporting a device at an address where nothing is.
+     */
+    if (result == HW_I2C_TIMEOUT || result == HW_I2C_ARB_LOST) {
         hw_reg_set_bits(I2C_CTR_REG(I2C0), 1u << I2C_FSM_RST_S);
         hw_reg_set_bits(I2C_CTR_REG(I2C0), 1u << I2C_CONF_UPGATE_S);
     }

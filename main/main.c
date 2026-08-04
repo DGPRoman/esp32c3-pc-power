@@ -24,6 +24,7 @@
 #include "hw_gpio.h"
 #include "hw_i2c.h"
 #include "ssd1306.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "boot";
 
@@ -132,52 +133,25 @@ static void i2c_scan(void)
              (unsigned)BOARD_I2C_SDA_GPIO, (unsigned)BOARD_I2C_SCL_GPIO);
 }
 
-enum {
-    /** Magnification for the self-test. At 1× a glyph on this panel is at the limit
-     *  of what an eye can resolve, so a bad bit could hide behind squinting; 2× is
-     *  unambiguous and still fits twelve characters on screen. */
-    FONT_TEST_SCALE = 2,
-
-    FONT_FIRST_CHAR = 0x20,
-    FONT_LAST_CHAR = 0x7E,
-
-    FONT_TEST_COLUMNS = SSD1306_TEXT_COLUMNS_AT(FONT_TEST_SCALE),
-    FONT_TEST_ROWS = SSD1306_TEXT_ROWS_AT(FONT_TEST_SCALE),
-    FONT_CHARS_PER_SCREEN = FONT_TEST_COLUMNS * FONT_TEST_ROWS,
-    FONT_PAGE_COUNT =
-        (FONT_LAST_CHAR - FONT_FIRST_CHAR + FONT_CHARS_PER_SCREEN) / FONT_CHARS_PER_SCREEN,
-
-    /** Ticks each page stays up. A tick is one heartbeat period, about a second. */
-    FONT_PAGE_TICKS = 2,
-};
-
 /**
- * @brief Draw one screenful of the font's character set.
+ * @brief Show what someone needs in order to put this device on a network.
  *
- * Bring-up scaffolding, in the same spirit as the geometry probe it replaces. Nearly
- * five hundred bytes of hand-entered glyph data has no failure mode that shows up at
- * build time, and a single wrong glyph stays invisible until something happens to
- * print that one character. Rendering the whole set makes every glyph answerable by
- * looking, which is the only verification available for data like this.
+ * The setup password exists only here. It is generated on the device and drawn on the
+ * panel, never logged and never stored anywhere a network can reach, so the only way
+ * to learn it is to be standing in front of the hardware — which for a box that lives
+ * inside a PC case is exactly the right bar.
+ *
+ * Row two is left blank as a separator: at twelve characters wide, whitespace is the
+ * only typography available.
  */
-static void draw_font_page(unsigned page)
+static void draw_setup_screen(void)
 {
-    char line[FONT_TEST_COLUMNS + 1u];
-    unsigned code = FONT_FIRST_CHAR + page * FONT_CHARS_PER_SCREEN;
-
     ssd1306_clear();
-
-    for (unsigned row = 0; row < FONT_TEST_ROWS; row++) {
-        unsigned length = 0;
-
-        while (length < FONT_TEST_COLUMNS && code <= FONT_LAST_CHAR) {
-            line[length++] = (char)code++;
-        }
-        line[length] = '\0';
-
-        ssd1306_draw_text(0, row * SSD1306_TEXT_LINE_HEIGHT_AT(FONT_TEST_SCALE), line,
-                          FONT_TEST_SCALE);
-    }
+    ssd1306_draw_text(0, 0u * SSD1306_TEXT_LINE_HEIGHT, "WIFI SETUP", 1u);
+    ssd1306_draw_text(0, 1u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_setup_ssid(), 1u);
+    ssd1306_draw_text(0, 3u * SSD1306_TEXT_LINE_HEIGHT, "PASSWORD", 1u);
+    ssd1306_draw_text(0, 4u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_setup_password(),
+                      1u);
 }
 
 void app_main(void)
@@ -224,33 +198,30 @@ void app_main(void)
         ESP_LOGI(TAG, "display: %ux%u at 0x%02X, %ux%u characters",
                  (unsigned)SSD1306_WIDTH, (unsigned)SSD1306_HEIGHT, SSD1306_ADDRESS,
                  (unsigned)SSD1306_TEXT_COLUMNS, (unsigned)SSD1306_TEXT_ROWS);
-        ESP_LOGI(TAG, "font test: %ux scale, %ux%u per page, %u pages of %u characters",
-                 (unsigned)FONT_TEST_SCALE, (unsigned)FONT_TEST_COLUMNS,
-                 (unsigned)FONT_TEST_ROWS, (unsigned)FONT_PAGE_COUNT,
-                 (unsigned)(FONT_LAST_CHAR - FONT_FIRST_CHAR + 1));
     } else {
         ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
     }
 
-    /*
-     * One loop driving both the heartbeat and the display, because there is exactly
-     * one thing going on. It becomes the power state machine's loop, and the display
-     * gets a task of its own, once there is something genuinely concurrent to
-     * justify the split.
-     */
-    for (unsigned tick = 0;; tick++) {
-        if (display == HW_I2C_OK && (tick % FONT_PAGE_TICKS) == 0u) {
-            draw_font_page((tick / FONT_PAGE_TICKS) % FONT_PAGE_COUNT);
+    const esp_err_t wifi = wifi_manager_start();
+    if (wifi != ESP_OK) {
+        ESP_LOGE(TAG, "wifi: setup mode failed: %s", esp_err_to_name(wifi));
+    }
 
-            display = ssd1306_flush();
-            if (display != HW_I2C_OK) {
-                /* Logged once: `display` stays non-OK, so the panel is not retried
-                 * every second, and the heartbeat keeps running to show that the
-                 * firmware itself is alive. */
-                ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
-            }
+    if (display == HW_I2C_OK && wifi == ESP_OK) {
+        draw_setup_screen();
+        display = ssd1306_flush();
+        if (display != HW_I2C_OK) {
+            ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
         }
+    }
 
+    /*
+     * The heartbeat is all this loop does for now. The screen is static until there is
+     * something to change it — the Wi-Fi driver's work happens in its own task, and
+     * redrawing an unchanged panel once a second would cost 32 ms of bus traffic to
+     * display the same thing.
+     */
+    for (;;) {
         status_led_set(true);
         vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_LIT_MS));
         status_led_set(false);
