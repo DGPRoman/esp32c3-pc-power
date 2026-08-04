@@ -132,32 +132,51 @@ static void i2c_scan(void)
              (unsigned)BOARD_I2C_SDA_GPIO, (unsigned)BOARD_I2C_SCL_GPIO);
 }
 
+enum {
+    /** Magnification for the self-test. At 1× a glyph on this panel is at the limit
+     *  of what an eye can resolve, so a bad bit could hide behind squinting; 2× is
+     *  unambiguous and still fits twelve characters on screen. */
+    FONT_TEST_SCALE = 2,
+
+    FONT_FIRST_CHAR = 0x20,
+    FONT_LAST_CHAR = 0x7E,
+
+    FONT_TEST_COLUMNS = SSD1306_TEXT_COLUMNS_AT(FONT_TEST_SCALE),
+    FONT_TEST_ROWS = SSD1306_TEXT_ROWS_AT(FONT_TEST_SCALE),
+    FONT_CHARS_PER_SCREEN = FONT_TEST_COLUMNS * FONT_TEST_ROWS,
+    FONT_PAGE_COUNT =
+        (FONT_LAST_CHAR - FONT_FIRST_CHAR + FONT_CHARS_PER_SCREEN) / FONT_CHARS_PER_SCREEN,
+
+    /** Ticks each page stays up. A tick is one heartbeat period, about a second. */
+    FONT_PAGE_TICKS = 2,
+};
+
 /**
- * @brief Draw a figure that makes the panel's geometry self-evident.
+ * @brief Draw one screenful of the font's character set.
  *
- * A one-pixel frame around the whole framebuffer, plus a solid block in the corner
- * the driver calls (0, 0). Getting an SSD1306's column offset, row count or
- * orientation wrong produces an image that is almost right, and "almost right" is
- * very hard to reason about when the subject is text. A frame either sits flush
- * against all four edges of the glass or visibly does not, and the block says which
- * way round the panel is bonded — two questions answered by looking once.
+ * Bring-up scaffolding, in the same spirit as the geometry probe it replaces. Nearly
+ * five hundred bytes of hand-entered glyph data has no failure mode that shows up at
+ * build time, and a single wrong glyph stays invisible until something happens to
+ * print that one character. Rendering the whole set makes every glyph answerable by
+ * looking, which is the only verification available for data like this.
  */
-static void display_geometry_probe(void)
+static void draw_font_page(unsigned page)
 {
+    char line[FONT_TEST_COLUMNS + 1u];
+    unsigned code = FONT_FIRST_CHAR + page * FONT_CHARS_PER_SCREEN;
+
     ssd1306_clear();
 
-    for (uint32_t x = 0; x < SSD1306_WIDTH; x++) {
-        ssd1306_set_pixel(x, 0, true);
-        ssd1306_set_pixel(x, SSD1306_HEIGHT - 1u, true);
-    }
-    for (uint32_t y = 0; y < SSD1306_HEIGHT; y++) {
-        ssd1306_set_pixel(0, y, true);
-        ssd1306_set_pixel(SSD1306_WIDTH - 1u, y, true);
-    }
-    for (uint32_t y = 0; y < 8u; y++) {
-        for (uint32_t x = 0; x < 8u; x++) {
-            ssd1306_set_pixel(x, y, true);
+    for (unsigned row = 0; row < FONT_TEST_ROWS; row++) {
+        unsigned length = 0;
+
+        while (length < FONT_TEST_COLUMNS && code <= FONT_LAST_CHAR) {
+            line[length++] = (char)code++;
         }
+        line[length] = '\0';
+
+        ssd1306_draw_text(0, row * SSD1306_TEXT_LINE_HEIGHT_AT(FONT_TEST_SCALE), line,
+                          FONT_TEST_SCALE);
     }
 }
 
@@ -190,23 +209,51 @@ void app_main(void)
     status_led_init();
     ESP_LOGI(TAG, "heartbeat on GPIO%u", (unsigned)BOARD_STATUS_LED_GPIO);
 
-    hw_i2c_init(BOARD_I2C_SDA_GPIO, BOARD_I2C_SCL_GPIO, BOARD_I2C_HZ);
-    i2c_scan();
-
-    hw_i2c_result_t display = ssd1306_init();
-    if (display == HW_I2C_OK) {
-        display_geometry_probe();
-        display = ssd1306_flush();
+    hw_i2c_result_t display = hw_i2c_init(BOARD_I2C_SDA_GPIO, BOARD_I2C_SCL_GPIO,
+                                          BOARD_I2C_HZ);
+    if (display != HW_I2C_OK) {
+        /* The bus could not be freed, so nothing read from it means anything. Say so
+         * and stop, rather than scanning a bus that is going to invent devices. */
+        ESP_LOGE(TAG, "i2c: %s", hw_i2c_result_name(display));
+    } else {
+        i2c_scan();
+        display = ssd1306_init();
     }
+
     if (display == HW_I2C_OK) {
-        ESP_LOGI(TAG, "display: %ux%u at 0x%02X, geometry probe shown",
-                 (unsigned)SSD1306_WIDTH, (unsigned)SSD1306_HEIGHT, SSD1306_ADDRESS);
+        ESP_LOGI(TAG, "display: %ux%u at 0x%02X, %ux%u characters",
+                 (unsigned)SSD1306_WIDTH, (unsigned)SSD1306_HEIGHT, SSD1306_ADDRESS,
+                 (unsigned)SSD1306_TEXT_COLUMNS, (unsigned)SSD1306_TEXT_ROWS);
+        ESP_LOGI(TAG, "font test: %ux scale, %ux%u per page, %u pages of %u characters",
+                 (unsigned)FONT_TEST_SCALE, (unsigned)FONT_TEST_COLUMNS,
+                 (unsigned)FONT_TEST_ROWS, (unsigned)FONT_PAGE_COUNT,
+                 (unsigned)(FONT_LAST_CHAR - FONT_FIRST_CHAR + 1));
     } else {
         ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
     }
 
-    for (bool lit = true;; lit = !lit) {
-        status_led_set(lit);
-        vTaskDelay(pdMS_TO_TICKS(lit ? HEARTBEAT_LIT_MS : HEARTBEAT_DARK_MS));
+    /*
+     * One loop driving both the heartbeat and the display, because there is exactly
+     * one thing going on. It becomes the power state machine's loop, and the display
+     * gets a task of its own, once there is something genuinely concurrent to
+     * justify the split.
+     */
+    for (unsigned tick = 0;; tick++) {
+        if (display == HW_I2C_OK && (tick % FONT_PAGE_TICKS) == 0u) {
+            draw_font_page((tick / FONT_PAGE_TICKS) % FONT_PAGE_COUNT);
+
+            display = ssd1306_flush();
+            if (display != HW_I2C_OK) {
+                /* Logged once: `display` stays non-OK, so the panel is not retried
+                 * every second, and the heartbeat keeps running to show that the
+                 * firmware itself is alive. */
+                ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
+            }
+        }
+
+        status_led_set(true);
+        vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_LIT_MS));
+        status_led_set(false);
+        vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_DARK_MS));
     }
 }

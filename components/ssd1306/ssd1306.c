@@ -159,6 +159,37 @@ void ssd1306_set_pixel(uint32_t x, uint32_t y, bool on)
     }
 }
 
+uint32_t ssd1306_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t scale)
+{
+    assert(scale > 0u);
+
+    for (const char *c = text; *c != '\0'; c++) {
+        const uint8_t *glyph = font5x7_glyph(*c);
+
+        for (uint32_t column = 0; column < FONT5X7_WIDTH; column++) {
+            const uint8_t bits = glyph[column];
+
+            for (uint32_t row = 0; row < FONT5X7_HEIGHT; row++) {
+                const bool on = ((bits >> row) & 1u) != 0u;
+
+                /* Each glyph pixel becomes a scale×scale block. Clipping lives in
+                 * ssd1306_set_pixel, which is why these loops can run straight off
+                 * the edge of the panel without checking where they are. */
+                for (uint32_t dy = 0; dy < scale; dy++) {
+                    for (uint32_t dx = 0; dx < scale; dx++) {
+                        ssd1306_set_pixel(x + column * scale + dx, y + row * scale + dy,
+                                          on);
+                    }
+                }
+            }
+        }
+
+        x += FONT5X7_ADVANCE * scale;
+    }
+
+    return x;
+}
+
 hw_i2c_result_t ssd1306_flush(void)
 {
     /* Point the write pointer at the visible window. Both ranges are inclusive, and

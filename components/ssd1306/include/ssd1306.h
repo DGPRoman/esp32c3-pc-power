@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "font5x7.h"
 #include "hw_i2c.h"
 
 #ifdef __cplusplus
@@ -59,6 +60,52 @@ void ssd1306_clear(void);
  * @param on True to light the pixel.
  */
 void ssd1306_set_pixel(uint32_t x, uint32_t y, bool on);
+
+/** @brief Vertical pitch of a text line at scale 1: a seven-row glyph plus a blank row. */
+#define SSD1306_TEXT_LINE_HEIGHT 8u
+
+/** @brief Vertical pitch of a text line drawn at @p scale. */
+#define SSD1306_TEXT_LINE_HEIGHT_AT(scale) (SSD1306_TEXT_LINE_HEIGHT * (scale))
+
+/** @brief Characters that fit across the panel at @p scale. */
+#define SSD1306_TEXT_COLUMNS_AT(scale) (SSD1306_WIDTH / (FONT5X7_ADVANCE * (scale)))
+
+/** @brief Text lines that fit down the panel at @p scale. */
+#define SSD1306_TEXT_ROWS_AT(scale) (SSD1306_HEIGHT / SSD1306_TEXT_LINE_HEIGHT_AT(scale))
+
+/**
+ * @brief Characters that fit across the panel at scale 1.
+ *
+ * Derived from the font rather than written down, so changing the font cannot leave a
+ * stale layout constant behind. Twelve is a coincidence worth keeping: an IPv4
+ * address in dotted-quad form runs to fifteen characters at worst, and the ones a
+ * home network actually hands out — 192.168.1.42 — are exactly twelve.
+ */
+#define SSD1306_TEXT_COLUMNS SSD1306_TEXT_COLUMNS_AT(1u)
+
+/** @brief Text lines that fit down the panel at scale 1. */
+#define SSD1306_TEXT_ROWS SSD1306_TEXT_ROWS_AT(1u)
+
+/**
+ * @brief Draw @p text into the framebuffer with its top-left corner at (@p x, @p y).
+ *
+ * Blank pixels within each glyph are written as dark rather than skipped, so text
+ * covers whatever it is drawn over instead of merging with it. Characters running
+ * past an edge are clipped away a pixel at a time; nothing wraps, because a status
+ * line that silently reflows is harder to read than one that is visibly cut off.
+ *
+ * @param scale Integer magnification: every glyph pixel becomes a @p scale square
+ *              block. There is no second font, because a device this size needs the
+ *              same characters at two sizes — a state word legible across a room and
+ *              an address legible up close — and scaling the one font keeps both
+ *              answerable by the same 475 bytes of verified data. Values above 1 are
+ *              blocky by construction; that is the trade, and at these sizes it reads
+ *              better than a smoothed glyph would.
+ *
+ * @return The x coordinate immediately after the last glyph, so consecutive pieces of
+ *         a line can be drawn without the caller recomputing widths.
+ */
+uint32_t ssd1306_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t scale);
 
 /**
  * @brief Send the framebuffer to the panel.
