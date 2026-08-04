@@ -22,6 +22,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hw_gpio.h"
+#include "hw_i2c.h"
 
 static const char *TAG = "boot";
 
@@ -95,6 +96,41 @@ static void status_led_set(bool lit)
                   lit ? BOARD_STATUS_LED_LIT_LEVEL : !BOARD_STATUS_LED_LIT_LEVEL);
 }
 
+/**
+ * @brief Report every address on the I²C bus that answers.
+ *
+ * The first thing worth knowing about a bus whose wiring is undocumented, and worth
+ * keeping afterwards: a display that has come loose shows up here as an address that
+ * stopped answering, which is a far better diagnostic than a blank screen.
+ *
+ * Addresses below 0x08 and above 0x77 are reserved by the I²C specification and are
+ * not probed — 0x00 is the general call, which a device may acknowledge without that
+ * saying anything about where it lives.
+ */
+static void i2c_scan(void)
+{
+    unsigned found = 0;
+
+    for (uint8_t address = 0x08; address <= 0x77; address++) {
+        const hw_i2c_result_t result = hw_i2c_probe(address);
+
+        if (result == HW_I2C_OK) {
+            ESP_LOGI(TAG, "i2c: device at 0x%02X", address);
+            found++;
+        } else if (result != HW_I2C_NACK) {
+            /* A NACK is the ordinary answer from an empty address. Anything else
+             * describes the bus rather than the address, and will not improve by
+             * asking the next one — so say so once and stop. */
+            ESP_LOGE(TAG, "i2c: probing 0x%02X failed: %s", address,
+                     hw_i2c_result_name(result));
+            return;
+        }
+    }
+
+    ESP_LOGI(TAG, "i2c: scan complete, %u device(s) on SDA=GPIO%u SCL=GPIO%u", found,
+             (unsigned)BOARD_I2C_SDA_GPIO, (unsigned)BOARD_I2C_SCL_GPIO);
+}
+
 void app_main(void)
 {
     /* The numeric code is logged alongside the name, unconditionally. A name this
@@ -123,6 +159,9 @@ void app_main(void)
 
     status_led_init();
     ESP_LOGI(TAG, "heartbeat on GPIO%u", (unsigned)BOARD_STATUS_LED_GPIO);
+
+    hw_i2c_init(BOARD_I2C_SDA_GPIO, BOARD_I2C_SCL_GPIO, BOARD_I2C_HZ);
+    i2c_scan();
 
     for (bool lit = true;; lit = !lit) {
         status_led_set(lit);

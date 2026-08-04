@@ -29,3 +29,25 @@
 
 /** @brief The level that lights ::BOARD_STATUS_LED_GPIO. */
 #define BOARD_STATUS_LED_LIT_LEVEL false
+
+/**
+ * @brief I²C bus carrying the on-board OLED.
+ *
+ * These pins are not silkscreened on the board and its seller publishes no
+ * schematic. They are what this family of modules uses, and the bus scan at startup
+ * is what turns that from an assumption into a fact — a scan finding nothing here is
+ * a reason to try other pairs before suspecting the display.
+ */
+#define BOARD_I2C_SDA_GPIO 5u
+#define BOARD_I2C_SCL_GPIO 6u
+
+/**
+ * @brief Bus frequency.
+ *
+ * 100 kHz, not the 400 kHz an SSD1306 will accept. Rise time on an I²C line is set
+ * by its pull-up resistors and the capacitance they have to charge, and the
+ * resistors fitted to this module are an unknown; a slower bus tolerates a weak
+ * pull-up that a faster one would not. Worth revisiting once the display is known
+ * to answer, since a display redraw is the one thing here that moves real data.
+ */
+#define BOARD_I2C_HZ 100000u

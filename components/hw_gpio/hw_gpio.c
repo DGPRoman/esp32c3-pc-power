@@ -2,6 +2,7 @@
 
 #include <assert.h>
 
+#include "hw_reg.h"
 #include "soc/gpio_reg.h"
 #include "soc/gpio_sig_map.h"
 #include "soc/io_mux_reg.h"
@@ -9,12 +10,12 @@
 /*
  * Register addresses come from the `soc` component instead of being copied out of
  * the Technical Reference Manual by hand. Those headers are the same register map
- * in machine-readable form, and a mistyped constant here would not fail to
- * compile — it would write into some unrelated peripheral. The logic below, which
- * is the part worth owning, is this project's own.
+ * in machine-readable form, and a mistyped address would not fail to compile — it
+ * would write into some unrelated peripheral. The logic below, which is the part
+ * worth owning, is this project's own.
  *
- * Asserts guard the pin argument. Every caller passes a compile-time constant from
- * the board pin map, so an out-of-range pin is a programming error rather than a
+ * Asserts guard the arguments. Every caller passes compile-time constants from the
+ * board pin map, so an out-of-range value is a programming error rather than a
  * runtime condition, and compiling the checks out in a release build loses nothing.
  */
 
@@ -26,26 +27,33 @@
  */
 #define PAD_REG(pin) (IO_MUX_GPIO0_REG + ((pin) * 4u))
 
-/** @brief GPIO matrix output-routing register for @p pin. */
+/** @brief Per-pin GPIO configuration register: open-drain, interrupt type, wake-up. */
+#define PIN_REG(pin) (GPIO_PIN0_REG + ((pin) * 4u))
+
+/** @brief GPIO matrix output-routing register for @p pin: which signal drives it. */
 #define OUT_SEL_REG(pin) (GPIO_FUNC0_OUT_SEL_CFG_REG + ((pin) * 4u))
 
-/*
- * `volatile` is the entire contract with the compiler here. It declares each
- * access an observable side effect at that exact address, so none of these reads
- * and writes may be held in a register, reordered against each other, merged, or
- * discarded. Without it, code that clears a bit and then sets it again is
- * legitimately optimised away to nothing — the compiler has no other way to know
- * that the store itself is the point.
+/**
+ * @brief GPIO matrix input-routing register for peripheral signal @p sig.
+ *
+ * Note the asymmetry with ::OUT_SEL_REG, which is indexed by pin while this is
+ * indexed by signal. Reaching for the wrong one is the standard way to spend an
+ * afternoon on a bus that is electrically perfect and answers nothing.
  */
-static inline uint32_t reg_read(uint32_t addr)
-{
-    return *(volatile uint32_t *)addr;
-}
+#define IN_SEL_REG(sig) (GPIO_FUNC0_IN_SEL_CFG_REG + ((sig) * 4u))
 
-static inline void reg_write(uint32_t addr, uint32_t value)
-{
-    *(volatile uint32_t *)addr = value;
-}
+/** @brief Peripheral signals the GPIO matrix can route, and so the limit on @p sig. */
+#define MATRIX_SIGNAL_COUNT 128u
+
+/*
+ * The matrix-routing enable bit in an input-routing register. The generated header
+ * names it after signal 0 (GPIO_SIG0_IN_SEL) rather than following the GPIO_FUNCn_
+ * convention of every other field in the same register, which is why it is easy to
+ * miss — and missing it is expensive: the peripheral then reads a constant instead
+ * of the pin. Every input-routing register has an identical layout, so the
+ * signal-0 constant is the right one to use for all of them.
+ */
+#define MATRIX_IN_ENABLE (1u << GPIO_SIG0_IN_SEL_S)
 
 void hw_gpio_write(uint32_t pin, bool level)
 {
@@ -59,7 +67,34 @@ void hw_gpio_write(uint32_t pin, bool level)
      * write drives its own pin, then this write puts the stale value back and
      * silently undoes it. That lost update is why the hardware provides these.
      */
-    reg_write(level ? GPIO_OUT_W1TS_REG : GPIO_OUT_W1TC_REG, 1u << pin);
+    hw_reg_write(level ? GPIO_OUT_W1TS_REG : GPIO_OUT_W1TC_REG, 1u << pin);
+}
+
+/**
+ * @brief Point @p pin's function multiplexer at the GPIO matrix.
+ *
+ * Every pad can be driven either by a peripheral hardwired to it or by the matrix,
+ * and until MCU_SEL selects the GPIO function, none of the GPIO registers reach the
+ * physical pin at all. The pulls and the input path are written explicitly rather
+ * than left alone, because the bootloader may have set them to anything and an
+ * initialisation that depends on what ran before it is not one.
+ */
+static void configure_pad(uint32_t pin, bool input_enable, bool pull_up)
+{
+    uint32_t pad = hw_reg_read(PAD_REG(pin));
+
+    pad &= ~((uint32_t)MCU_SEL_V << MCU_SEL_S);
+    pad |= (uint32_t)PIN_FUNC_GPIO << MCU_SEL_S;
+
+    pad &= ~((1u << FUN_IE_S) | (1u << FUN_PU_S) | (1u << FUN_PD_S));
+    if (input_enable) {
+        pad |= 1u << FUN_IE_S;
+    }
+    if (pull_up) {
+        pad |= 1u << FUN_PU_S;
+    }
+
+    hw_reg_write(PAD_REG(pin), pad);
 }
 
 void hw_gpio_output_init(uint32_t pin, bool level)
@@ -67,35 +102,63 @@ void hw_gpio_output_init(uint32_t pin, bool level)
     assert(pin <= HW_GPIO_MAX);
 
     /* Latch the level while the pad is still high-impedance; the output driver is
-     * enabled last, in step 3. */
+     * enabled last. */
     hw_gpio_write(pin, level);
 
-    /*
-     * Step 1 — aim the pad's function multiplexer at the GPIO matrix. Every pad
-     * can be driven either by a peripheral hardwired to it or by the matrix, and
-     * until MCU_SEL selects the GPIO function, none of the registers below reach
-     * the physical pin at all.
-     *
-     * The input path and both pull resistors are cleared in the same write. A
-     * push-pull output needs none of them, and the bootloader may have left them
-     * in any state — writing an explicit value makes this initialisation
-     * independent of whatever ran before it.
-     */
-    uint32_t pad = reg_read(PAD_REG(pin));
-    pad &= ~((uint32_t)MCU_SEL_V << MCU_SEL_S);
-    pad |= (uint32_t)PIN_FUNC_GPIO << MCU_SEL_S;
-    pad &= ~((1u << FUN_IE_S) | (1u << FUN_PU_S) | (1u << FUN_PD_S));
-    reg_write(PAD_REG(pin), pad);
+    /* A push-pull output needs neither the input path nor a pull resistor. */
+    configure_pad(pin, false, false);
+
+    /* Push-pull rather than open-drain, in case the pin was left otherwise. */
+    hw_reg_clear_bits(PIN_REG(pin), 1u << GPIO_PIN0_PAD_DRIVER_S);
 
     /*
-     * Step 2 — choose what the matrix feeds that pad. The register holds a
-     * peripheral output signal index; SIG_GPIO_OUT_IDX is the reserved value
-     * meaning "take the level from GPIO_OUT_REG" rather than from a peripheral.
-     * Writing the whole register also zeroes the inversion and output-enable
-     * override bits, which is the behaviour we want.
+     * Choose what the matrix feeds the pad. The register holds a peripheral output
+     * signal index; SIG_GPIO_OUT_IDX is the reserved value meaning "take the level
+     * from GPIO_OUT_REG" rather than from a peripheral. Writing the whole register
+     * also zeroes the inversion and output-enable override bits. Leaving OEN_SEL
+     * clear is correct even though it reads as "the peripheral controls the output
+     * enable": for this signal index that peripheral enable is GPIO_ENABLE, set
+     * immediately below.
      */
-    reg_write(OUT_SEL_REG(pin), SIG_GPIO_OUT_IDX);
+    hw_reg_write(OUT_SEL_REG(pin), SIG_GPIO_OUT_IDX);
 
-    /* Step 3 — enable the pin's output driver. */
-    reg_write(GPIO_ENABLE_W1TS_REG, 1u << pin);
+    hw_reg_write(GPIO_ENABLE_W1TS_REG, 1u << pin);
+}
+
+void hw_gpio_open_drain_init(uint32_t pin, uint32_t out_signal, uint32_t in_signal,
+                             bool pull_up)
+{
+    assert(pin <= HW_GPIO_MAX);
+    assert(out_signal <= GPIO_FUNC0_OUT_SEL_V);
+    assert(in_signal < MATRIX_SIGNAL_COUNT);
+
+    /* Release the line before anything can drive it. With the output latch high and
+     * the pad open-drain, the pin is passive as far as the bus is concerned, so
+     * bringing it up cannot look like a device asserting a start condition. */
+    hw_gpio_write(pin, true);
+
+    /*
+     * Open drain. With PAD_DRIVER set, writing a 1 stops driving instead of sourcing
+     * current, so a device pulling the line low is not fighting a driver pushing it
+     * high — on a shared bus, that fight is a short circuit through both devices.
+     */
+    hw_reg_set_bits(PIN_REG(pin), 1u << GPIO_PIN0_PAD_DRIVER_S);
+
+    /* The input path stays on. A bus controller has to read back the line it is
+     * driving: that is how it sees an acknowledgement, and how it notices a
+     * peripheral holding the clock low to ask for time. */
+    configure_pad(pin, true, pull_up);
+
+    /*
+     * Output: which signal reaches this pin. OEN_SEL is left clear, which hands the
+     * output enable to the peripheral rather than to GPIO_ENABLE — the peripheral is
+     * what decides, bit by bit, whether the line is pulled down or released.
+     */
+    hw_reg_write(OUT_SEL_REG(pin), out_signal);
+
+    /* Input: which pin reaches this signal, plus the enable that makes the matrix
+     * carry it at all. */
+    hw_reg_write(IN_SEL_REG(in_signal), pin | MATRIX_IN_ENABLE);
+
+    hw_reg_write(GPIO_ENABLE_W1TS_REG, 1u << pin);
 }

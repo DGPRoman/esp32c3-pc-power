@@ -6,5 +6,5 @@
 idf_component_register(
     SRCS "hw_gpio.c"
     INCLUDE_DIRS "include"
-    PRIV_REQUIRES soc
+    PRIV_REQUIRES soc hw_reg
 )
