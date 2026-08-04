@@ -111,7 +111,7 @@ artefact flashable to more than one unit.
 Early development. The HTTP contract is not stable yet.
 
 - [x] Project scaffolding, build, flash, console
-- [ ] Register-level GPIO — status LED
+- [x] Register-level GPIO — status LED
 - [ ] Register-level I²C and SSD1306 driver — status display
 - [ ] Wi-Fi, NVS-backed provisioning
 - [ ] HTTP server and authenticated command endpoints

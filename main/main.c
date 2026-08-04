@@ -5,45 +5,82 @@
  * `app_main` is not C's `main`. By the time it runs, ESP-IDF's startup code has
  * already run the second-stage bootloader, initialised the heap, and started the
  * FreeRTOS scheduler; `app_main` is then spawned as an ordinary task. Returning
- * from it is legal and deletes only that task — the scheduler keeps running
- * everything else that was started. Nothing long-lived exists yet, so returning
- * is currently the correct thing to do.
+ * from it would delete only that task and leave the scheduler running — which is
+ * also why the heartbeat below can simply loop here instead of needing a task of
+ * its own. It moves into one as soon as there is a second thing to do at the same
+ * time.
  */
 
 #include <inttypes.h>
+#include <stdbool.h>
 
+#include "board.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "hw_gpio.h"
 
 static const char *TAG = "boot";
+
+/*
+ * A brief flash on a long period rather than an even blink. It reads as a
+ * heartbeat at a glance, spends almost no time lit inside a closed case, and
+ * leaves the *shape* of the pattern free to carry meaning later: a lost Wi-Fi
+ * link or a command in flight can change the pattern without changing the rate.
+ * The FreeRTOS tick is 100 Hz by default, so intervals shorter than 10 ms would
+ * round away — these are chosen to be well clear of that.
+ */
+enum {
+    HEARTBEAT_LIT_MS = 50,
+    HEARTBEAT_DARK_MS = 950,
+};
 
 /**
  * @brief Human-readable form of the reason the CPU last started executing.
  *
  * Worth logging on every boot: this device's whole job is to be reachable when
- * the machine it controls is off, so an unexplained restart is a fault, not
- * noise. The reset reason is what distinguishes a power cut from a panic, a
+ * the machine it controls is off, so an unexplained restart is a fault rather
+ * than noise. The reset reason is what separates a power cut from a panic, a
  * watchdog timeout, or a deliberate reboot — and it is the one diagnostic that
  * survives having no debugger attached.
  */
 static const char *reset_reason_name(esp_reset_reason_t reason)
 {
     switch (reason) {
-    case ESP_RST_POWERON:  return "power-on";
-    case ESP_RST_EXT:      return "external pin";
-    case ESP_RST_SW:       return "software";
-    case ESP_RST_PANIC:    return "panic";
-    case ESP_RST_INT_WDT:  return "interrupt watchdog";
-    case ESP_RST_TASK_WDT: return "task watchdog";
-    case ESP_RST_WDT:      return "other watchdog";
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "external pin";
+    case ESP_RST_SW:        return "software";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_WDT:       return "other watchdog";
     case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
-    case ESP_RST_BROWNOUT: return "brownout";
-    case ESP_RST_SDIO:     return "SDIO";
-    case ESP_RST_UNKNOWN:  return "unknown";
-    default:               return "unrecognised";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "SDIO";
+    case ESP_RST_UNKNOWN:   return "unknown";
+    default:                return "unrecognised";
     }
+}
+
+/**
+ * @brief Claim the status LED's pin, starting dark.
+ *
+ * Dark rather than lit, because a lit LED is a statement — once the heartbeat is
+ * running it means "firmware is alive", and it should not say that before the
+ * firmware has got as far as saying it deliberately.
+ */
+static void status_led_init(void)
+{
+    hw_gpio_output_init(BOARD_STATUS_LED_GPIO, !BOARD_STATUS_LED_LIT_LEVEL);
+}
+
+static void status_led_set(bool lit)
+{
+    hw_gpio_write(BOARD_STATUS_LED_GPIO,
+                  lit ? BOARD_STATUS_LED_LIT_LEVEL : !BOARD_STATUS_LED_LIT_LEVEL);
 }
 
 void app_main(void)
@@ -56,8 +93,8 @@ void app_main(void)
              CONFIG_IDF_TARGET, chip.revision / 100, chip.revision % 100, chip.cores);
 
     /* Flash size is read from the chip rather than taken from sdkconfig, so a
-     * board that does not match the configured size shows up here instead of as
-     * a mysterious failure later, once something writes past the end of it. */
+     * board that does not match the configured size shows up here instead of as a
+     * mysterious failure later, once something writes past the end of it. */
     uint32_t flash_size = 0;
     if (esp_flash_get_size(NULL, &flash_size) == ESP_OK) {
         ESP_LOGI(TAG, "flash: %" PRIu32 " KiB", flash_size / 1024);
@@ -66,4 +103,12 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "free heap: %" PRIu32 " bytes", esp_get_free_heap_size());
+
+    status_led_init();
+    ESP_LOGI(TAG, "heartbeat on GPIO%u", (unsigned)BOARD_STATUS_LED_GPIO);
+
+    for (bool lit = true;; lit = !lit) {
+        status_led_set(lit);
+        vTaskDelay(pdMS_TO_TICKS(lit ? HEARTBEAT_LIT_MS : HEARTBEAT_DARK_MS));
+    }
 }
