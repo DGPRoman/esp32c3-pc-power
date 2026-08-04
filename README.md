@@ -113,7 +113,8 @@ Early development. The HTTP contract is not stable yet.
 - [x] Project scaffolding, build, flash, console
 - [x] Register-level GPIO — status LED
 - [x] Register-level I²C master, bus scan
-- [ ] SSD1306 driver — status display
+- [x] SSD1306 driver — framebuffer, 72×40 geometry
+- [ ] Text rendering
 - [ ] Wi-Fi, NVS-backed provisioning
 - [ ] HTTP server and authenticated command endpoints
 - [ ] Power pulse output, LED sense, power-state machine

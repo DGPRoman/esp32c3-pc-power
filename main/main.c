@@ -23,6 +23,7 @@
 #include "freertos/task.h"
 #include "hw_gpio.h"
 #include "hw_i2c.h"
+#include "ssd1306.h"
 
 static const char *TAG = "boot";
 
@@ -131,6 +132,35 @@ static void i2c_scan(void)
              (unsigned)BOARD_I2C_SDA_GPIO, (unsigned)BOARD_I2C_SCL_GPIO);
 }
 
+/**
+ * @brief Draw a figure that makes the panel's geometry self-evident.
+ *
+ * A one-pixel frame around the whole framebuffer, plus a solid block in the corner
+ * the driver calls (0, 0). Getting an SSD1306's column offset, row count or
+ * orientation wrong produces an image that is almost right, and "almost right" is
+ * very hard to reason about when the subject is text. A frame either sits flush
+ * against all four edges of the glass or visibly does not, and the block says which
+ * way round the panel is bonded — two questions answered by looking once.
+ */
+static void display_geometry_probe(void)
+{
+    ssd1306_clear();
+
+    for (uint32_t x = 0; x < SSD1306_WIDTH; x++) {
+        ssd1306_set_pixel(x, 0, true);
+        ssd1306_set_pixel(x, SSD1306_HEIGHT - 1u, true);
+    }
+    for (uint32_t y = 0; y < SSD1306_HEIGHT; y++) {
+        ssd1306_set_pixel(0, y, true);
+        ssd1306_set_pixel(SSD1306_WIDTH - 1u, y, true);
+    }
+    for (uint32_t y = 0; y < 8u; y++) {
+        for (uint32_t x = 0; x < 8u; x++) {
+            ssd1306_set_pixel(x, y, true);
+        }
+    }
+}
+
 void app_main(void)
 {
     /* The numeric code is logged alongside the name, unconditionally. A name this
@@ -162,6 +192,18 @@ void app_main(void)
 
     hw_i2c_init(BOARD_I2C_SDA_GPIO, BOARD_I2C_SCL_GPIO, BOARD_I2C_HZ);
     i2c_scan();
+
+    hw_i2c_result_t display = ssd1306_init();
+    if (display == HW_I2C_OK) {
+        display_geometry_probe();
+        display = ssd1306_flush();
+    }
+    if (display == HW_I2C_OK) {
+        ESP_LOGI(TAG, "display: %ux%u at 0x%02X, geometry probe shown",
+                 (unsigned)SSD1306_WIDTH, (unsigned)SSD1306_HEIGHT, SSD1306_ADDRESS);
+    } else {
+        ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
+    }
 
     for (bool lit = true;; lit = !lit) {
         status_led_set(lit);
