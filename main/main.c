@@ -39,30 +39,42 @@ enum {
 };
 
 /**
- * @brief Human-readable form of the reason the CPU last started executing.
+ * @brief Name for @p reason, or NULL if this build has no name for it.
  *
  * Worth logging on every boot: this device's whole job is to be reachable when
  * the machine it controls is off, so an unexplained restart is a fault rather
- * than noise. The reset reason is what separates a power cut from a panic, a
- * watchdog timeout, or a deliberate reboot — and it is the one diagnostic that
- * survives having no debugger attached.
+ * than noise. The reset reason separates a power cut from a panic, a watchdog
+ * timeout, or a deliberate reboot, and it is the one diagnostic that survives
+ * having no debugger attached. ESP-IDF ships no helper for it.
+ *
+ * There is deliberately no `default` case. The enum grows between IDF versions —
+ * five of the values below did not exist a few releases ago — and a `default`
+ * turns that growth into a log line that says nothing, at exactly the moment the
+ * log matters. Without one, the next addition is a compiler warning instead. The
+ * NULL return then covers only what a `default` cannot help with anyway: a value
+ * that is not a valid enumerator at all.
  */
 static const char *reset_reason_name(esp_reset_reason_t reason)
 {
     switch (reason) {
-    case ESP_RST_POWERON:   return "power-on";
-    case ESP_RST_EXT:       return "external pin";
-    case ESP_RST_SW:        return "software";
-    case ESP_RST_PANIC:     return "panic";
-    case ESP_RST_INT_WDT:   return "interrupt watchdog";
-    case ESP_RST_TASK_WDT:  return "task watchdog";
-    case ESP_RST_WDT:       return "other watchdog";
-    case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
-    case ESP_RST_BROWNOUT:  return "brownout";
-    case ESP_RST_SDIO:      return "SDIO";
-    case ESP_RST_UNKNOWN:   return "unknown";
-    default:                return "unrecognised";
+    case ESP_RST_UNKNOWN:    return "unknown";
+    case ESP_RST_POWERON:    return "power-on";
+    case ESP_RST_EXT:        return "external pin";
+    case ESP_RST_SW:         return "software";
+    case ESP_RST_PANIC:      return "panic";
+    case ESP_RST_INT_WDT:    return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:   return "task watchdog";
+    case ESP_RST_WDT:        return "other watchdog";
+    case ESP_RST_DEEPSLEEP:  return "deep-sleep wake";
+    case ESP_RST_BROWNOUT:   return "brownout";
+    case ESP_RST_SDIO:       return "SDIO";
+    case ESP_RST_USB:        return "USB peripheral";
+    case ESP_RST_JTAG:       return "JTAG";
+    case ESP_RST_EFUSE:      return "efuse error";
+    case ESP_RST_PWR_GLITCH: return "power glitch";
+    case ESP_RST_CPU_LOCKUP: return "CPU lockup";
     }
+    return NULL;
 }
 
 /**
@@ -85,7 +97,12 @@ static void status_led_set(bool lit)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "reset reason: %s", reset_reason_name(esp_reset_reason()));
+    /* The numeric code is logged alongside the name, unconditionally. A name this
+     * build does not have is still a number someone can look up, which is the
+     * difference between a diagnosable boot and a dead end. */
+    const esp_reset_reason_t reason = esp_reset_reason();
+    const char *name = reset_reason_name(reason);
+    ESP_LOGI(TAG, "reset reason: %s (%d)", name ? name : "unnamed", (int)reason);
 
     esp_chip_info_t chip;
     esp_chip_info(&chip);
