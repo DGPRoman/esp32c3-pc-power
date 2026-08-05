@@ -13,17 +13,27 @@
 
 #include <inttypes.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "board.h"
+#include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "http_server.h"
 #include "hw_gpio.h"
 #include "hw_i2c.h"
 #include "ssd1306.h"
+#include "wifi_manager.h"
+
+/** @brief Port the provisioning page is served on. */
+#define HTTP_PORT 80u
+
+/** @brief Address the access point answers on, fixed by esp_netif's default AP config. */
+#define SETUP_ADDRESS "192.168.4.1"
 
 static const char *TAG = "boot";
 
@@ -132,52 +142,83 @@ static void i2c_scan(void)
              (unsigned)BOARD_I2C_SDA_GPIO, (unsigned)BOARD_I2C_SCL_GPIO);
 }
 
-enum {
-    /** Magnification for the self-test. At 1× a glyph on this panel is at the limit
-     *  of what an eye can resolve, so a bad bit could hide behind squinting; 2× is
-     *  unambiguous and still fits twelve characters on screen. */
-    FONT_TEST_SCALE = 2,
-
-    FONT_FIRST_CHAR = 0x20,
-    FONT_LAST_CHAR = 0x7E,
-
-    FONT_TEST_COLUMNS = SSD1306_TEXT_COLUMNS_AT(FONT_TEST_SCALE),
-    FONT_TEST_ROWS = SSD1306_TEXT_ROWS_AT(FONT_TEST_SCALE),
-    FONT_CHARS_PER_SCREEN = FONT_TEST_COLUMNS * FONT_TEST_ROWS,
-    FONT_PAGE_COUNT =
-        (FONT_LAST_CHAR - FONT_FIRST_CHAR + FONT_CHARS_PER_SCREEN) / FONT_CHARS_PER_SCREEN,
-
-    /** Ticks each page stays up. A tick is one heartbeat period, about a second. */
-    FONT_PAGE_TICKS = 2,
-};
+/**
+ * @brief Show what someone needs in order to put this device on a network.
+ *
+ * Three lines, in the order they get used: join this network, type this key, open this
+ * address. Twelve characters leaves no room for labels, so the sequence carries the
+ * meaning instead — and the values are self-identifying anyway, since one is a network
+ * name, one is ten uppercase characters, and one has dots in it.
+ *
+ * The setup password exists only here. It is generated on the device and drawn on the
+ * panel, never logged and never held anywhere a network can reach, so the only way to
+ * learn it is to be standing in front of the hardware. For a box that lives inside a PC
+ * case, that is exactly the right bar.
+ */
+static void draw_setup_screen(void)
+{
+    ssd1306_clear();
+    ssd1306_draw_text(0, 0u * SSD1306_TEXT_LINE_HEIGHT, "WIFI SETUP", 1u);
+    ssd1306_draw_text(0, 1u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_setup_ssid(), 1u);
+    ssd1306_draw_text(0, 2u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_setup_password(),
+                      1u);
+    ssd1306_draw_text(0, 3u * SSD1306_TEXT_LINE_HEIGHT, SETUP_ADDRESS, 1u);
+}
 
 /**
- * @brief Draw one screenful of the font's character set.
+ * @brief The provisioning page.
  *
- * Bring-up scaffolding, in the same spirit as the geometry probe it replaces. Nearly
- * five hundred bytes of hand-entered glyph data has no failure mode that shows up at
- * build time, and a single wrong glyph stays invisible until something happens to
- * print that one character. Rendering the whole set makes every glyph answerable by
- * looking, which is the only verification available for data like this.
+ * Everything is inline. A device serving a page over its own access point has no
+ * internet behind it, so a stylesheet or font from a CDN is a request that hangs until
+ * the browser gives up — and the page renders unstyled after a delay that looks like the
+ * device being broken.
  */
-static void draw_font_page(unsigned page)
+static const char SETUP_PAGE[] =
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>PC power controller</title><style>"
+    "body{font:16px/1.5 system-ui,-apple-system,sans-serif;margin:0;padding:1.5rem;"
+    "background:#14161a;color:#e8eaed}"
+    "h1{font-size:1.2rem;margin:0 0 .5rem}p{margin:0 0 1.5rem;color:#9aa0a6}"
+    "dt{font-size:.8rem;color:#9aa0a6;text-transform:uppercase;letter-spacing:.05em}"
+    "dd{margin:.15rem 0 1rem;font-family:ui-monospace,monospace;color:#8ab4f8}"
+    "</style></head><body><h1>PC power controller</h1>"
+    "<p>Setup mode. This device is not on a network yet.</p>"
+    "<dl><dt>Access point</dt><dd>%s</dd>"
+    "<dt>Firmware</dt><dd>%s</dd></dl></body></html>";
+
+/**
+ * @brief Answer one request.
+ *
+ * Runs on the server's task. Everything it needs is already in memory, so it neither
+ * blocks nor touches the display — a handler that waited on the I2C bus would hold the
+ * only connection slot for the 32 ms a redraw takes.
+ */
+static void on_http_request(const http_request_t *request, http_response_t *response)
 {
-    char line[FONT_TEST_COLUMNS + 1u];
-    unsigned code = FONT_FIRST_CHAR + page * FONT_CHARS_PER_SCREEN;
-
-    ssd1306_clear();
-
-    for (unsigned row = 0; row < FONT_TEST_ROWS; row++) {
-        unsigned length = 0;
-
-        while (length < FONT_TEST_COLUMNS && code <= FONT_LAST_CHAR) {
-            line[length++] = (char)code++;
-        }
-        line[length] = '\0';
-
-        ssd1306_draw_text(0, row * SSD1306_TEXT_LINE_HEIGHT_AT(FONT_TEST_SCALE), line,
-                          FONT_TEST_SCALE);
+    if (strcmp(request->method, "GET") != 0) {
+        response->status = 405;
+        return;
     }
+    if (strcmp(request->target, "/") != 0) {
+        response->status = 404;
+        return;
+    }
+
+    const int written =
+        snprintf(response->body, response->body_capacity, SETUP_PAGE,
+                 wifi_manager_setup_ssid(), esp_app_get_description()->version);
+
+    if (written < 0 || (size_t)written >= response->body_capacity) {
+        /* Truncated output would be a broken page. Reporting a server error says which
+         * side the fault is on, which a half-rendered page does not. */
+        response->status = 500;
+        return;
+    }
+
+    response->status = 200;
+    response->content_type = "text/html; charset=utf-8";
+    response->body_length = (size_t)written;
 }
 
 void app_main(void)
@@ -224,33 +265,38 @@ void app_main(void)
         ESP_LOGI(TAG, "display: %ux%u at 0x%02X, %ux%u characters",
                  (unsigned)SSD1306_WIDTH, (unsigned)SSD1306_HEIGHT, SSD1306_ADDRESS,
                  (unsigned)SSD1306_TEXT_COLUMNS, (unsigned)SSD1306_TEXT_ROWS);
-        ESP_LOGI(TAG, "font test: %ux scale, %ux%u per page, %u pages of %u characters",
-                 (unsigned)FONT_TEST_SCALE, (unsigned)FONT_TEST_COLUMNS,
-                 (unsigned)FONT_TEST_ROWS, (unsigned)FONT_PAGE_COUNT,
-                 (unsigned)(FONT_LAST_CHAR - FONT_FIRST_CHAR + 1));
     } else {
         ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
     }
 
-    /*
-     * One loop driving both the heartbeat and the display, because there is exactly
-     * one thing going on. It becomes the power state machine's loop, and the display
-     * gets a task of its own, once there is something genuinely concurrent to
-     * justify the split.
-     */
-    for (unsigned tick = 0;; tick++) {
-        if (display == HW_I2C_OK && (tick % FONT_PAGE_TICKS) == 0u) {
-            draw_font_page((tick / FONT_PAGE_TICKS) % FONT_PAGE_COUNT);
-
-            display = ssd1306_flush();
-            if (display != HW_I2C_OK) {
-                /* Logged once: `display` stays non-OK, so the panel is not retried
-                 * every second, and the heartbeat keeps running to show that the
-                 * firmware itself is alive. */
-                ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
-            }
+    const esp_err_t wifi = wifi_manager_start();
+    if (wifi != ESP_OK) {
+        ESP_LOGE(TAG, "wifi: setup mode failed: %s", esp_err_to_name(wifi));
+    } else {
+        const esp_err_t server = http_server_start(HTTP_PORT, &on_http_request);
+        if (server == ESP_OK) {
+            ESP_LOGI(TAG, "setup: join \"%s\" and open http://%s",
+                     wifi_manager_setup_ssid(), SETUP_ADDRESS);
+        } else {
+            ESP_LOGE(TAG, "http: %s", esp_err_to_name(server));
         }
+    }
 
+    if (display == HW_I2C_OK && wifi == ESP_OK) {
+        draw_setup_screen();
+        display = ssd1306_flush();
+        if (display != HW_I2C_OK) {
+            ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
+        }
+    }
+
+    /*
+     * The heartbeat is all this loop does for now. The screen is static until there is
+     * something to change it — the Wi-Fi driver's work happens in its own task, and
+     * redrawing an unchanged panel once a second would cost 32 ms of bus traffic to
+     * display the same thing.
+     */
+    for (;;) {
         status_led_set(true);
         vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_LIT_MS));
         status_led_set(false);
