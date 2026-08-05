@@ -77,11 +77,16 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     }
 
     default:
-        /* The driver emits a good deal more than this. Reporting the ones not acted on
-         * by number keeps the boot log short while still making it possible to tell
-         * "no such event arrived" from "the handler never ran" — a distinction that is
-         * invisible when unhandled events are silently dropped. */
-        ESP_LOGI(TAG, "setup: unhandled wifi event %ld", (long)id);
+        /*
+         * At debug level, not info. This existed to tell "no such event arrived" from
+         * "the handler never ran", which it did — and the answer was that the handler
+         * was fine and its log tag was being filtered. Past that it is one line of noise
+         * per boot carrying a number that cannot be turned back into a name: wifi_event_t
+         * is built with preprocessor conditionals, so which enumerator a given id refers
+         * to depends on what the target supports. Raise the level when the question comes
+         * up again rather than paying for the answer every boot.
+         */
+        ESP_LOGD(TAG, "setup: unhandled wifi event %ld", (long)id);
         break;
     }
 }

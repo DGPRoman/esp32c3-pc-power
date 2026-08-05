@@ -116,8 +116,9 @@ Early development. The HTTP contract is not stable yet.
 - [x] SSD1306 driver — framebuffer, 72×40 geometry
 - [x] 5×7 font and text rendering
 - [x] Setup-mode access point, credentials in NVS
+- [x] HTTP/1.1 server on BSD sockets
 - [ ] Provisioning portal, joining a network
-- [ ] HTTP server and authenticated command endpoints
+- [ ] Authenticated command endpoints
 - [ ] Power pulse output, LED sense, power-state machine
 - [ ] Hub-side integration
 

@@ -13,18 +13,27 @@
 
 #include <inttypes.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "board.h"
+#include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "http_server.h"
 #include "hw_gpio.h"
 #include "hw_i2c.h"
 #include "ssd1306.h"
 #include "wifi_manager.h"
+
+/** @brief Port the provisioning page is served on. */
+#define HTTP_PORT 80u
+
+/** @brief Address the access point answers on, fixed by esp_netif's default AP config. */
+#define SETUP_ADDRESS "192.168.4.1"
 
 static const char *TAG = "boot";
 
@@ -136,22 +145,80 @@ static void i2c_scan(void)
 /**
  * @brief Show what someone needs in order to put this device on a network.
  *
- * The setup password exists only here. It is generated on the device and drawn on the
- * panel, never logged and never stored anywhere a network can reach, so the only way
- * to learn it is to be standing in front of the hardware — which for a box that lives
- * inside a PC case is exactly the right bar.
+ * Three lines, in the order they get used: join this network, type this key, open this
+ * address. Twelve characters leaves no room for labels, so the sequence carries the
+ * meaning instead — and the values are self-identifying anyway, since one is a network
+ * name, one is ten uppercase characters, and one has dots in it.
  *
- * Row two is left blank as a separator: at twelve characters wide, whitespace is the
- * only typography available.
+ * The setup password exists only here. It is generated on the device and drawn on the
+ * panel, never logged and never held anywhere a network can reach, so the only way to
+ * learn it is to be standing in front of the hardware. For a box that lives inside a PC
+ * case, that is exactly the right bar.
  */
 static void draw_setup_screen(void)
 {
     ssd1306_clear();
     ssd1306_draw_text(0, 0u * SSD1306_TEXT_LINE_HEIGHT, "WIFI SETUP", 1u);
     ssd1306_draw_text(0, 1u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_setup_ssid(), 1u);
-    ssd1306_draw_text(0, 3u * SSD1306_TEXT_LINE_HEIGHT, "PASSWORD", 1u);
-    ssd1306_draw_text(0, 4u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_setup_password(),
+    ssd1306_draw_text(0, 2u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_setup_password(),
                       1u);
+    ssd1306_draw_text(0, 3u * SSD1306_TEXT_LINE_HEIGHT, SETUP_ADDRESS, 1u);
+}
+
+/**
+ * @brief The provisioning page.
+ *
+ * Everything is inline. A device serving a page over its own access point has no
+ * internet behind it, so a stylesheet or font from a CDN is a request that hangs until
+ * the browser gives up — and the page renders unstyled after a delay that looks like the
+ * device being broken.
+ */
+static const char SETUP_PAGE[] =
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>PC power controller</title><style>"
+    "body{font:16px/1.5 system-ui,-apple-system,sans-serif;margin:0;padding:1.5rem;"
+    "background:#14161a;color:#e8eaed}"
+    "h1{font-size:1.2rem;margin:0 0 .5rem}p{margin:0 0 1.5rem;color:#9aa0a6}"
+    "dt{font-size:.8rem;color:#9aa0a6;text-transform:uppercase;letter-spacing:.05em}"
+    "dd{margin:.15rem 0 1rem;font-family:ui-monospace,monospace;color:#8ab4f8}"
+    "</style></head><body><h1>PC power controller</h1>"
+    "<p>Setup mode. This device is not on a network yet.</p>"
+    "<dl><dt>Access point</dt><dd>%s</dd>"
+    "<dt>Firmware</dt><dd>%s</dd></dl></body></html>";
+
+/**
+ * @brief Answer one request.
+ *
+ * Runs on the server's task. Everything it needs is already in memory, so it neither
+ * blocks nor touches the display — a handler that waited on the I2C bus would hold the
+ * only connection slot for the 32 ms a redraw takes.
+ */
+static void on_http_request(const http_request_t *request, http_response_t *response)
+{
+    if (strcmp(request->method, "GET") != 0) {
+        response->status = 405;
+        return;
+    }
+    if (strcmp(request->target, "/") != 0) {
+        response->status = 404;
+        return;
+    }
+
+    const int written =
+        snprintf(response->body, response->body_capacity, SETUP_PAGE,
+                 wifi_manager_setup_ssid(), esp_app_get_description()->version);
+
+    if (written < 0 || (size_t)written >= response->body_capacity) {
+        /* Truncated output would be a broken page. Reporting a server error says which
+         * side the fault is on, which a half-rendered page does not. */
+        response->status = 500;
+        return;
+    }
+
+    response->status = 200;
+    response->content_type = "text/html; charset=utf-8";
+    response->body_length = (size_t)written;
 }
 
 void app_main(void)
@@ -205,6 +272,14 @@ void app_main(void)
     const esp_err_t wifi = wifi_manager_start();
     if (wifi != ESP_OK) {
         ESP_LOGE(TAG, "wifi: setup mode failed: %s", esp_err_to_name(wifi));
+    } else {
+        const esp_err_t server = http_server_start(HTTP_PORT, &on_http_request);
+        if (server == ESP_OK) {
+            ESP_LOGI(TAG, "setup: join \"%s\" and open http://%s",
+                     wifi_manager_setup_ssid(), SETUP_ADDRESS);
+        } else {
+            ESP_LOGE(TAG, "http: %s", esp_err_to_name(server));
+        }
     }
 
     if (display == HW_I2C_OK && wifi == ESP_OK) {
