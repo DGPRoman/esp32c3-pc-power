@@ -36,8 +36,15 @@ extern "C" {
 /** @brief Largest request body accepted. A provisioning form is a few hundred bytes. */
 #define HTTP_REQUEST_BODY_MAX 512u
 
-/** @brief Capacity of the buffer a handler writes its response into. */
-#define HTTP_RESPONSE_BODY_MAX 4096u
+/**
+ * @brief Capacity of the buffer a handler writes its response into.
+ *
+ * Sized for the provisioning page with a full list of nearby networks rendered into
+ * it, the largest thing this device serves — comfortably past that rather than exactly
+ * at it, because the margin is cheap and a handler that comes up five bytes short only
+ * finds out from a 500 on real hardware.
+ */
+#define HTTP_RESPONSE_BODY_MAX 8192u
 
 /** @brief The parts of a request a handler is given. */
 typedef struct {

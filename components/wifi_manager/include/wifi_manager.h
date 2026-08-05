@@ -11,11 +11,33 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/** @brief Longest SSID 802.11 allows, in bytes. Matches ::WIFI_STORE_SSID_MAX. */
+#define WIFI_MANAGER_SSID_MAX 32u
+
+/**
+ * @brief Networks a scan will report.
+ *
+ * Scan results come back sorted by signal strength, so this caps the list to the
+ * strongest this many rather than an arbitrary one: the networks it drops are exactly
+ * the ones least likely to hold a connection anyway.
+ */
+#define WIFI_MANAGER_SCAN_MAX 16u
+
+/** @brief One network in range, as far as choosing one to join needs to know. */
+typedef struct {
+    char ssid[WIFI_MANAGER_SSID_MAX + 1u];
+    /** Whether joining it needs a password. */
+    bool secured;
+} wifi_manager_network_t;
 
 /**
  * @brief Bring up Wi-Fi in setup mode.
@@ -26,6 +48,25 @@ extern "C" {
  * machine with one reachable state is a state machine written too early.
  */
 esp_err_t wifi_manager_start(void);
+
+/**
+ * @brief Scan for nearby networks, blocking until the scan completes.
+ *
+ * About a second and a half: the radio visits every 2.4 GHz channel in turn, and while
+ * it is on a channel other than the setup access point's own, this device's beacon
+ * goes out late. The one station allowed to associate — the phone doing the
+ * provisioning — tolerates a gap that short without deciding the access point is gone;
+ * nothing shorter would reach every channel.
+ *
+ * A network answering on more than one access point — a mesh, a repeater — is reported
+ * once. Which one of those access points supplied the entry is not meaningful here:
+ * joining is by name, and the strongest of them was already the one kept, because the
+ * driver returns results in descending signal order.
+ *
+ * @param out   Array of at least ::WIFI_MANAGER_SCAN_MAX entries.
+ * @param count In: capacity of @p out. Out: networks written.
+ */
+esp_err_t wifi_manager_scan(wifi_manager_network_t *out, uint16_t *count);
 
 /**
  * @brief SSID of the setup access point, or an empty string before it is up.

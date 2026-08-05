@@ -35,7 +35,26 @@
 /** @brief Address the access point answers on, fixed by esp_netif's default AP config. */
 #define SETUP_ADDRESS "192.168.4.1"
 
+/**
+ * @brief Bytes reserved per rendered network in the list below.
+ *
+ * An SSID is at most 32 octets, and HTML-escaping the worst case — every one of them a
+ * character that expands to an entity — multiplies that by up to five. Plus a fixed
+ * allowance for the surrounding markup and the "(open)" suffix: generous enough that
+ * the per-item snprintf below never truncates in practice, while the check that
+ * follows it means nothing breaks on the day it does.
+ */
+#define NETWORK_ITEM_BUDGET ((WIFI_MANAGER_SSID_MAX * 5u) + 32u)
+
 static const char *TAG = "boot";
+
+/*
+ * Room for every network a scan can return, at the per-item budget above. Static, not
+ * a stack local: it is built inside the HTTP server's request handler, which runs on a
+ * task with a 4 KiB stack, and a buffer this size on that stack is the exact fault this
+ * codebase has already been careful to avoid everywhere else a response is assembled.
+ */
+static char s_network_list[WIFI_MANAGER_SCAN_MAX * NETWORK_ITEM_BUDGET];
 
 /*
  * A brief flash on a long period rather than an even blink. It reads as a
@@ -143,6 +162,99 @@ static void i2c_scan(void)
 }
 
 /**
+ * @brief Append @p ssid to @p out as HTML text content, escaping the three characters
+ *        that would otherwise be read as markup.
+ *
+ * An SSID is 802.11's to hand out, not this device's: anyone in radio range names their
+ * own access point, and that name lands in a page this device serves. It is not this
+ * project's threat model that gains from it — the only person who can read this page is
+ * the one standing in front of the hardware provisioning it — but a neighbour's SSID
+ * closing a tag it did not open is a defect either way, and escaping it costs one
+ * switch per character.
+ *
+ * @return Bytes written, not counting the terminator, or 0 if @p size left no room.
+ */
+static size_t append_escaped(char *out, size_t size, const char *ssid)
+{
+    size_t pos = 0;
+
+    for (const char *p = ssid; *p != '\0'; p++) {
+        const char *entity;
+        switch (*p) {
+        case '&': entity = "&amp;"; break;
+        case '<': entity = "&lt;"; break;
+        case '>': entity = "&gt;"; break;
+        default:  entity = NULL;   break;
+        }
+
+        const size_t needed = entity != NULL ? strlen(entity) : 1u;
+        if (pos + needed >= size) {
+            /* No room left, and no partial entity: better to end the name one
+             * character early than to hand the browser "&am" and have it wait for
+             * a semicolon that is never coming. */
+            break;
+        }
+
+        if (entity != NULL) {
+            memcpy(&out[pos], entity, needed);
+        } else {
+            out[pos] = *p;
+        }
+        pos += needed;
+    }
+
+    out[pos] = '\0';
+    return pos;
+}
+
+/**
+ * @brief Render the networks currently in range into @ref s_network_list.
+ *
+ * Scanning blocks for as long as the radio needs to visit every channel — about a
+ * second and a half — which is why this runs only when the page that shows the result
+ * is actually being requested, and not on a timer no one is looking at.
+ */
+static void build_network_list(void)
+{
+    static wifi_manager_network_t networks[WIFI_MANAGER_SCAN_MAX];
+    uint16_t count = WIFI_MANAGER_SCAN_MAX;
+
+    const esp_err_t err = wifi_manager_scan(networks, &count);
+
+    if (err != ESP_OK) {
+        snprintf(s_network_list, sizeof(s_network_list), "<li>Scan failed</li>");
+        return;
+    }
+
+    if (count == 0) {
+        snprintf(s_network_list, sizeof(s_network_list), "<li>None found</li>");
+        return;
+    }
+
+    size_t pos = 0;
+    for (uint16_t i = 0; i < count; i++) {
+        /* Each entry fits within NETWORK_ITEM_BUDGET by construction, so this never
+         * runs short before sizeof(s_network_list) does — but the check stays, because
+         * "cannot happen" is not the same claim as "checked". */
+        if (sizeof(s_network_list) - pos < NETWORK_ITEM_BUDGET) {
+            break;
+        }
+
+        const int written = snprintf(&s_network_list[pos], sizeof(s_network_list) - pos,
+                                     "<li>");
+        pos += (size_t)written;
+        pos += append_escaped(&s_network_list[pos], sizeof(s_network_list) - pos,
+                              networks[i].ssid);
+        if (!networks[i].secured) {
+            pos += (size_t)snprintf(&s_network_list[pos], sizeof(s_network_list) - pos,
+                                    " (open)");
+        }
+        pos += (size_t)snprintf(&s_network_list[pos], sizeof(s_network_list) - pos,
+                                "</li>");
+    }
+}
+
+/**
  * @brief Show what someone needs in order to put this device on a network.
  *
  * Three lines, in the order they get used: join this network, type this key, open this
@@ -182,17 +294,23 @@ static const char SETUP_PAGE[] =
     "h1{font-size:1.2rem;margin:0 0 .5rem}p{margin:0 0 1.5rem;color:#9aa0a6}"
     "dt{font-size:.8rem;color:#9aa0a6;text-transform:uppercase;letter-spacing:.05em}"
     "dd{margin:.15rem 0 1rem;font-family:ui-monospace,monospace;color:#8ab4f8}"
+    "h2{font-size:.9rem;margin:0 0 .5rem;color:#9aa0a6;font-weight:400}"
+    "ul{list-style:none;margin:0;padding:0}"
+    "li{padding:.4rem 0;border-top:1px solid #2a2d33}"
     "</style></head><body><h1>PC power controller</h1>"
     "<p>Setup mode. This device is not on a network yet.</p>"
     "<dl><dt>Access point</dt><dd>%s</dd>"
-    "<dt>Firmware</dt><dd>%s</dd></dl></body></html>";
+    "<dt>Firmware</dt><dd>%s</dd></dl>"
+    "<h2>Networks in range</h2><ul>%s</ul></body></html>";
 
 /**
  * @brief Answer one request.
  *
- * Runs on the server's task. Everything it needs is already in memory, so it neither
- * blocks nor touches the display — a handler that waited on the I2C bus would hold the
- * only connection slot for the 32 ms a redraw takes.
+ * Runs on the server's task, which is why it still doesn't touch the display — a
+ * handler that waited on the I2C bus would hold the only connection slot for the 32 ms
+ * a redraw takes. It does now block on a Wi-Fi scan, for about a second and a half:
+ * the request asking for this page is, so far, always a person watching their phone
+ * wait for exactly that.
  */
 static void on_http_request(const http_request_t *request, http_response_t *response)
 {
@@ -205,9 +323,12 @@ static void on_http_request(const http_request_t *request, http_response_t *resp
         return;
     }
 
+    build_network_list();
+
     const int written =
         snprintf(response->body, response->body_capacity, SETUP_PAGE,
-                 wifi_manager_setup_ssid(), esp_app_get_description()->version);
+                 wifi_manager_setup_ssid(), esp_app_get_description()->version,
+                 s_network_list);
 
     if (written < 0 || (size_t)written >= response->body_capacity) {
         /* Truncated output would be a broken page. Reporting a server error says which

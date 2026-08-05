@@ -133,6 +133,14 @@ esp_err_t wifi_manager_start(void)
         return ESP_FAIL;
     }
 
+    /* Nothing is joined through this interface yet — there is no stored network, and
+     * won't be until the portal can write one — but esp_wifi_scan_start() only works in
+     * WIFI_MODE_STA or WIFI_MODE_APSTA, and the station control block it scans through
+     * is created from this netif when Wi-Fi starts below. */
+    if (esp_netif_create_default_wifi_sta() == NULL) {
+        return ESP_FAIL;
+    }
+
     const wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     err = esp_wifi_init(&init);
     if (err != ESP_OK) {
@@ -181,7 +189,7 @@ esp_err_t wifi_manager_start(void)
     memcpy(config.ap.ssid, s_setup_ssid, strlen(s_setup_ssid));
     memcpy(config.ap.password, s_setup_password, strlen(s_setup_password));
 
-    err = esp_wifi_set_mode(WIFI_MODE_AP);
+    err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) {
         return err;
     }
@@ -212,4 +220,78 @@ const char *wifi_manager_setup_ssid(void)
 const char *wifi_manager_setup_password(void)
 {
     return s_setup_password;
+}
+
+/**
+ * @brief True if @p ssid already appears among the first @p count entries of @p out.
+ *
+ * A network reachable through more than one access point — a mesh, a repeater — is one
+ * choice to the person provisioning, not several identical-looking rows.
+ */
+static bool already_listed(const wifi_manager_network_t *out, uint16_t count,
+                           const char *ssid)
+{
+    for (uint16_t i = 0; i < count; i++) {
+        if (strcmp(out[i].ssid, ssid) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+esp_err_t wifi_manager_scan(wifi_manager_network_t *out, uint16_t *count)
+{
+    const uint16_t capacity = *count;
+    *count = 0;
+
+    if (capacity == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const wifi_scan_config_t config = {
+        .show_hidden = false,
+    };
+
+    esp_err_t err = esp_wifi_scan_start(&config, true);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "scan: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    /*
+     * Static, and zeroed before use, for the same reason as everywhere else a buffer
+     * this size appears: it does not belong on a task's stack. The zeroing matters on
+     * its own — an SSID is up to 32 arbitrary octets in a 33-byte field, and nothing in
+     * the driver's contract promises the 33rd byte is a terminator. ESP-IDF's own scan
+     * example zeroes this array before the scan and then reads every ssid field as a C
+     * string, so this does the same rather than trust a guarantee that is not written
+     * down anywhere.
+     */
+    static wifi_ap_record_t s_records[WIFI_MANAGER_SCAN_MAX];
+    memset(s_records, 0, sizeof(s_records));
+
+    uint16_t fetched = capacity < WIFI_MANAGER_SCAN_MAX ? capacity : WIFI_MANAGER_SCAN_MAX;
+    err = esp_wifi_scan_get_ap_records(&fetched, s_records);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "scan: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    uint16_t written = 0;
+    for (uint16_t i = 0; i < fetched && written < capacity; i++) {
+        const char *ssid = (const char *)s_records[i].ssid;
+
+        if (ssid[0] == '\0' || already_listed(out, written, ssid)) {
+            continue;
+        }
+
+        snprintf(out[written].ssid, sizeof(out[written].ssid), "%s", ssid);
+        out[written].secured = s_records[i].authmode != WIFI_AUTH_OPEN;
+        written++;
+    }
+
+    *count = written;
+    ESP_LOGI(TAG, "scan: %u network(s) in range, %u shown", (unsigned)fetched,
+             (unsigned)written);
+    return ESP_OK;
 }
