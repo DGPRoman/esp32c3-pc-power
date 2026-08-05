@@ -117,7 +117,7 @@ Early development. The HTTP contract is not stable yet.
 - [x] 5×7 font and text rendering
 - [x] Setup-mode access point, credentials in NVS
 - [x] HTTP/1.1 server on BSD sockets
-- [ ] Provisioning portal, joining a network
+- [x] Provisioning portal, joining a network
 - [ ] Authenticated command endpoints
 - [ ] Power pulse output, LED sense, power-state machine
 - [ ] Hub-side integration

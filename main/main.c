@@ -286,6 +286,38 @@ static void draw_setup_screen(void)
     ssd1306_draw_text(0, 3u * SSD1306_TEXT_LINE_HEIGHT, SETUP_ADDRESS, 1u);
 }
 
+/** @brief Show the network this device joined, and the address it can be reached at. */
+static void draw_connected_screen(void)
+{
+    ssd1306_clear();
+    ssd1306_draw_text(0, 0u * SSD1306_TEXT_LINE_HEIGHT, "CONNECTED", 1u);
+    ssd1306_draw_text(0, 1u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_station_ssid(), 1u);
+    ssd1306_draw_text(0, 2u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_station_ip(), 1u);
+}
+
+/**
+ * @brief Redraw whichever of the two screens above matches the current connection
+ *        state.
+ *
+ * Called from app_main's own task only — at boot, and from the heartbeat loop whenever
+ * it notices the state has changed — so this and the initial draw in app_main are the
+ * only two places touching the display, exactly like before this device had a second
+ * thing to show. A handler running on the Wi-Fi event task would be a second one.
+ */
+static void refresh_display(void)
+{
+    if (wifi_manager_station_connected()) {
+        draw_connected_screen();
+    } else {
+        draw_setup_screen();
+    }
+
+    const hw_i2c_result_t result = ssd1306_flush();
+    if (result != HW_I2C_OK) {
+        ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(result));
+    }
+}
+
 /**
  * @brief The provisioning page.
  *
@@ -594,21 +626,30 @@ void app_main(void)
         }
     }
 
-    if (display == HW_I2C_OK && wifi == ESP_OK) {
-        draw_setup_screen();
-        display = ssd1306_flush();
-        if (display != HW_I2C_OK) {
-            ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
-        }
+    const bool display_ok = (display == HW_I2C_OK) && (wifi == ESP_OK);
+    if (display_ok) {
+        refresh_display();
     }
 
     /*
-     * The heartbeat is all this loop does for now. The screen is static until there is
-     * something to change it — the Wi-Fi driver's work happens in its own task, and
-     * redrawing an unchanged panel once a second would cost 32 ms of bus traffic to
-     * display the same thing.
+     * Connecting, losing a connection, and getting one back all happen on the Wi-Fi
+     * driver's own task, not this one — see the "only app_main's task touches the
+     * display" note on refresh_display(). So this loop polls instead of reacting: once
+     * a second, on the same cadence as the heartbeat it already keeps, it checks
+     * whether the state shown on the panel still matches reality, and only pays for a
+     * redraw — 32 ms of bus traffic — on the second that it does not.
      */
+    bool last_connected = wifi_manager_station_connected();
+
     for (;;) {
+        if (display_ok) {
+            const bool connected = wifi_manager_station_connected();
+            if (connected != last_connected) {
+                refresh_display();
+                last_connected = connected;
+            }
+        }
+
         status_led_set(true);
         vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_LIT_MS));
         status_led_set(false);

@@ -43,12 +43,12 @@ typedef struct {
 } wifi_manager_network_t;
 
 /**
- * @brief Bring up Wi-Fi in setup mode.
+ * @brief Bring up Wi-Fi.
  *
- * There is deliberately no second path yet. Joining a stored network needs a stored
- * network, and until the provisioning portal exists nothing can write one — so a
- * branch on the store's contents would be a branch that cannot be taken, and a state
- * machine with one reachable state is a state machine written too early.
+ * The setup access point always comes up. If a network is already stored, joining it
+ * is attempted too, in parallel — not instead: the access point stays up until that
+ * attempt succeeds, and comes back if a later one fails, so this device is never only
+ * reachable through a connection that might not exist.
  */
 esp_err_t wifi_manager_start(void);
 
@@ -72,13 +72,12 @@ esp_err_t wifi_manager_start(void);
 esp_err_t wifi_manager_scan(wifi_manager_network_t *out, uint16_t *count);
 
 /**
- * @brief Save a network to join.
+ * @brief Save a network, and start trying to join it.
  *
- * Only saves it — nothing here switches this device off the setup access point or
- * attempts a connection. Those are kept apart deliberately: the moment this device
- * stops being reachable at 192.168.4.1, the phone that just submitted this form loses
- * its only way to find out whether the network it named was even reachable, let alone
- * whether the password was right.
+ * The attempt itself is delayed a few seconds: this call is answered over the setup
+ * access point it might succeed fast enough to tear down, and a connection quicker
+ * than that response would turn a successful save into a page the phone never gets to
+ * see. A network already stored is replaced, not merged with — one device, one target.
  *
  * @param ssid     Network name. Must not be empty.
  * @param password Passphrase, or an empty string for an open network.
@@ -101,6 +100,20 @@ const char *wifi_manager_setup_ssid(void);
  * between a stranger in radio range and this device's configuration.
  */
 const char *wifi_manager_setup_password(void);
+
+/**
+ * @brief SSID this device is trying to join, or an empty string if none is stored.
+ */
+const char *wifi_manager_station_ssid(void);
+
+/** @brief Whether the station role currently holds a connection and an address. */
+bool wifi_manager_station_connected(void);
+
+/**
+ * @brief This device's address on the joined network, or an empty string if it is not
+ *        currently connected.
+ */
+const char *wifi_manager_station_ip(void);
 
 #ifdef __cplusplus
 }
