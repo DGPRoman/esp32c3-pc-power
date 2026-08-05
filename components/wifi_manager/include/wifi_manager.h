@@ -23,6 +23,9 @@ extern "C" {
 /** @brief Longest SSID 802.11 allows, in bytes. Matches ::WIFI_STORE_SSID_MAX. */
 #define WIFI_MANAGER_SSID_MAX 32u
 
+/** @brief Longest WPA2 passphrase. Matches ::WIFI_STORE_PASSWORD_MAX. */
+#define WIFI_MANAGER_PASSWORD_MAX 63u
+
 /**
  * @brief Networks a scan will report.
  *
@@ -67,6 +70,20 @@ esp_err_t wifi_manager_start(void);
  * @param count In: capacity of @p out. Out: networks written.
  */
 esp_err_t wifi_manager_scan(wifi_manager_network_t *out, uint16_t *count);
+
+/**
+ * @brief Save a network to join.
+ *
+ * Only saves it — nothing here switches this device off the setup access point or
+ * attempts a connection. Those are kept apart deliberately: the moment this device
+ * stops being reachable at 192.168.4.1, the phone that just submitted this form loses
+ * its only way to find out whether the network it named was even reachable, let alone
+ * whether the password was right.
+ *
+ * @param ssid     Network name. Must not be empty.
+ * @param password Passphrase, or an empty string for an open network.
+ */
+esp_err_t wifi_manager_join(const char *ssid, const char *password);
 
 /**
  * @brief SSID of the setup access point, or an empty string before it is up.

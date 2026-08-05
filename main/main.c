@@ -39,12 +39,13 @@
  * @brief Bytes reserved per rendered network in the list below.
  *
  * An SSID is at most 32 octets, and HTML-escaping the worst case — every one of them a
- * character that expands to an entity — multiplies that by up to five. Plus a fixed
- * allowance for the surrounding markup and the "(open)" suffix: generous enough that
- * the per-item snprintf below never truncates in practice, while the check that
- * follows it means nothing breaks on the day it does.
+ * character that expands to an entity — multiplies that by up to five. Each entry
+ * shows the escaped name twice, once as the option's value and once as what the person
+ * choosing it reads, plus a fixed allowance for the surrounding markup and the "(open)"
+ * suffix: generous enough that the per-item snprintf below never truncates in
+ * practice, while the check that follows it means nothing breaks on the day it does.
  */
-#define NETWORK_ITEM_BUDGET ((WIFI_MANAGER_SSID_MAX * 5u) + 32u)
+#define NETWORK_ITEM_BUDGET (2u * (WIFI_MANAGER_SSID_MAX * 5u) + 48u)
 
 static const char *TAG = "boot";
 
@@ -162,15 +163,16 @@ static void i2c_scan(void)
 }
 
 /**
- * @brief Append @p ssid to @p out as HTML text content, escaping the three characters
- *        that would otherwise be read as markup.
+ * @brief Append @p ssid to @p out as HTML, escaping the four characters that would
+ *        otherwise be read as markup in either text content or a quoted attribute.
  *
  * An SSID is 802.11's to hand out, not this device's: anyone in radio range names their
- * own access point, and that name lands in a page this device serves. It is not this
- * project's threat model that gains from it — the only person who can read this page is
- * the one standing in front of the hardware provisioning it — but a neighbour's SSID
- * closing a tag it did not open is a defect either way, and escaping it costs one
- * switch per character.
+ * own access point, and that name lands in a page this device serves — once as an
+ * option's value, once as what the person choosing it reads. It is not this project's
+ * threat model that gains from it — the only person who can read this page is the one
+ * standing in front of the hardware provisioning it — but a neighbour's SSID closing a
+ * tag, or a quoted attribute, it did not open is a defect either way, and escaping it
+ * costs one switch per character.
  *
  * @return Bytes written, not counting the terminator, or 0 if @p size left no room.
  */
@@ -181,10 +183,11 @@ static size_t append_escaped(char *out, size_t size, const char *ssid)
     for (const char *p = ssid; *p != '\0'; p++) {
         const char *entity;
         switch (*p) {
-        case '&': entity = "&amp;"; break;
-        case '<': entity = "&lt;"; break;
-        case '>': entity = "&gt;"; break;
-        default:  entity = NULL;   break;
+        case '&':  entity = "&amp;";  break;
+        case '<':  entity = "&lt;";   break;
+        case '>':  entity = "&gt;";   break;
+        case '"':  entity = "&quot;"; break;
+        default:   entity = NULL;     break;
         }
 
         const size_t needed = entity != NULL ? strlen(entity) : 1u;
@@ -208,11 +211,17 @@ static size_t append_escaped(char *out, size_t size, const char *ssid)
 }
 
 /**
- * @brief Render the networks currently in range into @ref s_network_list.
+ * @brief Render the networks currently in range into @ref s_network_list, as the
+ *        options of a &lt;select&gt;.
  *
  * Scanning blocks for as long as the radio needs to visit every channel — about a
  * second and a half — which is why this runs only when the page that shows the result
  * is actually being requested, and not on a timer no one is looking at.
+ *
+ * An option's value is not left to default to its text content: that default is the
+ * text as the browser sees it after whitespace handling that varies by implementation,
+ * and a network's name should not depend on that when it is about to be typed into a
+ * Wi-Fi credential.
  */
 static void build_network_list(void)
 {
@@ -222,12 +231,12 @@ static void build_network_list(void)
     const esp_err_t err = wifi_manager_scan(networks, &count);
 
     if (err != ESP_OK) {
-        snprintf(s_network_list, sizeof(s_network_list), "<li>Scan failed</li>");
+        snprintf(s_network_list, sizeof(s_network_list), "<option>Scan failed</option>");
         return;
     }
 
     if (count == 0) {
-        snprintf(s_network_list, sizeof(s_network_list), "<li>None found</li>");
+        snprintf(s_network_list, sizeof(s_network_list), "<option>None found</option>");
         return;
     }
 
@@ -240,17 +249,17 @@ static void build_network_list(void)
             break;
         }
 
-        const int written = snprintf(&s_network_list[pos], sizeof(s_network_list) - pos,
-                                     "<li>");
-        pos += (size_t)written;
-        pos += append_escaped(&s_network_list[pos], sizeof(s_network_list) - pos,
-                              networks[i].ssid);
-        if (!networks[i].secured) {
-            pos += (size_t)snprintf(&s_network_list[pos], sizeof(s_network_list) - pos,
-                                    " (open)");
+        char escaped[WIFI_MANAGER_SSID_MAX * 6u + 1u];
+        append_escaped(escaped, sizeof(escaped), networks[i].ssid);
+
+        const int written =
+            snprintf(&s_network_list[pos], sizeof(s_network_list) - pos,
+                     "<option value=\"%s\">%s%s</option>", escaped, escaped,
+                     networks[i].secured ? "" : " (open)");
+        if (written < 0) {
+            break;
         }
-        pos += (size_t)snprintf(&s_network_list[pos], sizeof(s_network_list) - pos,
-                                "</li>");
+        pos += (size_t)written;
     }
 }
 
@@ -295,34 +304,36 @@ static const char SETUP_PAGE[] =
     "dt{font-size:.8rem;color:#9aa0a6;text-transform:uppercase;letter-spacing:.05em}"
     "dd{margin:.15rem 0 1rem;font-family:ui-monospace,monospace;color:#8ab4f8}"
     "h2{font-size:.9rem;margin:0 0 .5rem;color:#9aa0a6;font-weight:400}"
-    "ul{list-style:none;margin:0;padding:0}"
-    "li{padding:.4rem 0;border-top:1px solid #2a2d33}"
+    "select,input,button{width:100%%;box-sizing:border-box;font:inherit;padding:.6rem;"
+    "margin:0 0 .75rem;border-radius:.3rem;border:1px solid #2a2d33;"
+    "background:#1c1f24;color:#e8eaed}"
+    "button{background:#8ab4f8;color:#14161a;border:none;font-weight:600}"
     "</style></head><body><h1>PC power controller</h1>"
     "<p>Setup mode. This device is not on a network yet.</p>"
     "<dl><dt>Access point</dt><dd>%s</dd>"
     "<dt>Firmware</dt><dd>%s</dd></dl>"
-    "<h2>Networks in range</h2><ul>%s</ul></body></html>";
+    "<h2>Join a network</h2>"
+    "<form method=\"post\" action=\"/network\">"
+    "<select name=\"ssid\" required>%s</select>"
+    "<input type=\"password\" name=\"password\" placeholder=\"Password (blank if open)\">"
+    "<button type=\"submit\">Join</button>"
+    "</form></body></html>";
 
-/**
- * @brief Answer one request.
- *
- * Runs on the server's task, which is why it still doesn't touch the display — a
- * handler that waited on the I2C bus would hold the only connection slot for the 32 ms
- * a redraw takes. It does now block on a Wi-Fi scan, for about a second and a half:
- * the request asking for this page is, so far, always a person watching their phone
- * wait for exactly that.
- */
-static void on_http_request(const http_request_t *request, http_response_t *response)
+/** @brief Confirmation shown after a network is saved. */
+static const char JOINED_PAGE[] =
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>PC power controller</title><style>"
+    "body{font:16px/1.5 system-ui,-apple-system,sans-serif;margin:0;padding:1.5rem;"
+    "background:#14161a;color:#e8eaed}"
+    "h1{font-size:1.2rem;margin:0 0 .5rem}p{margin:0;color:#9aa0a6}"
+    "dd{font-family:ui-monospace,monospace;color:#8ab4f8;margin:.15rem 0 0}"
+    "</style></head><body><h1>Saved</h1>"
+    "<p>This device will use</p><dd>%s</dd></body></html>";
+
+/** @brief Serve the setup page: access point details, and networks in range. */
+static void handle_setup_page(http_response_t *response)
 {
-    if (strcmp(request->method, "GET") != 0) {
-        response->status = 405;
-        return;
-    }
-    if (strcmp(request->target, "/") != 0) {
-        response->status = 404;
-        return;
-    }
-
     build_network_list();
 
     const int written =
@@ -340,6 +351,186 @@ static void on_http_request(const http_request_t *request, http_response_t *resp
     response->status = 200;
     response->content_type = "text/html; charset=utf-8";
     response->body_length = (size_t)written;
+}
+
+/** @brief Value of one hex digit, or -1 if @p c is not one. */
+static int hex_digit(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+/**
+ * @brief Decode @p value_length bytes of an application/x-www-form-urlencoded value
+ *        into @p out.
+ *
+ * '+' stands for a literal space in this encoding — unlike a URL's own query string,
+ * where it does not — and every other reserved or non-ASCII byte arrives as %XX. A
+ * percent not followed by two hex digits is treated as a malformed request rather than
+ * copied through: what a lenient parser lets pass is what ends up stored in NVS.
+ *
+ * @return True if @p value decoded into @p out without truncation.
+ */
+static bool url_decode(const char *value, size_t value_length, char *out, size_t out_size)
+{
+    size_t in = 0;
+    size_t pos = 0;
+
+    while (in < value_length) {
+        if (pos + 1u >= out_size) {
+            return false;
+        }
+
+        if (value[in] == '+') {
+            out[pos++] = ' ';
+            in++;
+        } else if (value[in] == '%') {
+            if (in + 2u >= value_length) {
+                return false;
+            }
+            const int high = hex_digit(value[in + 1u]);
+            const int low = hex_digit(value[in + 2u]);
+            if (high < 0 || low < 0) {
+                return false;
+            }
+            out[pos++] = (char)((high << 4) | low);
+            in += 3u;
+        } else {
+            out[pos++] = value[in];
+            in++;
+        }
+    }
+
+    out[pos] = '\0';
+    return true;
+}
+
+/**
+ * @brief Find the raw, still-encoded value of field @p name in an
+ *        application/x-www-form-urlencoded @p body.
+ *
+ * @param value_length Receives the raw value's length.
+ * @return Pointer to the value within @p body, or NULL if the field is absent.
+ */
+static const char *find_field(const char *body, const char *name, size_t *value_length)
+{
+    const size_t name_length = strlen(name);
+    const char *field = body;
+
+    /* Every value this loop considers a candidate is the start of a field: the first
+     * iteration by definition, and every later one because the previous iteration only
+     * advances to just past an '&'. */
+    while (field != NULL) {
+        if (strncmp(field, name, name_length) == 0 && field[name_length] == '=') {
+            const char *value = field + name_length + 1u;
+            const char *end = strchr(value, '&');
+            *value_length = end != NULL ? (size_t)(end - value) : strlen(value);
+            return value;
+        }
+
+        field = strchr(field, '&');
+        if (field != NULL) {
+            field++;
+        }
+    }
+
+    return NULL;
+}
+
+/**
+ * @brief Handle a submission of the provisioning form.
+ *
+ * Only saves the network — see ::wifi_manager_join for why connecting is a separate
+ * step. The values decoded here are bounded by the caller-supplied buffer sizes before
+ * anything is done with them, so neither a name nor a password too long to store is
+ * ever handed onward; it is answered with 400 instead.
+ */
+static void handle_join_network(const http_request_t *request, http_response_t *response)
+{
+    size_t raw_ssid_length = 0;
+    const char *raw_ssid = find_field(request->body, "ssid", &raw_ssid_length);
+    if (raw_ssid == NULL) {
+        response->status = 400;
+        return;
+    }
+
+    char ssid[WIFI_MANAGER_SSID_MAX + 1u];
+    if (!url_decode(raw_ssid, raw_ssid_length, ssid, sizeof(ssid)) || ssid[0] == '\0') {
+        response->status = 400;
+        return;
+    }
+
+    char password[WIFI_MANAGER_PASSWORD_MAX + 1u];
+    password[0] = '\0';
+    size_t raw_password_length = 0;
+    const char *raw_password = find_field(request->body, "password", &raw_password_length);
+    if (raw_password != NULL &&
+        !url_decode(raw_password, raw_password_length, password, sizeof(password))) {
+        response->status = 400;
+        return;
+    }
+
+    const esp_err_t err = wifi_manager_join(ssid, password);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "network: %s", esp_err_to_name(err));
+        response->status = 500;
+        return;
+    }
+
+    char escaped[WIFI_MANAGER_SSID_MAX * 6u + 1u];
+    append_escaped(escaped, sizeof(escaped), ssid);
+
+    const int written =
+        snprintf(response->body, response->body_capacity, JOINED_PAGE, escaped);
+    if (written < 0 || (size_t)written >= response->body_capacity) {
+        response->status = 500;
+        return;
+    }
+
+    ESP_LOGI(TAG, "network: saved \"%s\"", ssid);
+    response->status = 200;
+    response->content_type = "text/html; charset=utf-8";
+    response->body_length = (size_t)written;
+}
+
+/**
+ * @brief Answer one request.
+ *
+ * Runs on the server's task, which is why it still doesn't touch the display — a
+ * handler that waited on the I2C bus would hold the only connection slot for the 32 ms
+ * a redraw takes. Serving "/" does now block on a Wi-Fi scan, for about a second and a
+ * half: the request asking for that page is, so far, always a person watching their
+ * own phone wait for exactly that.
+ */
+static void on_http_request(const http_request_t *request, http_response_t *response)
+{
+    if (strcmp(request->target, "/") == 0) {
+        if (strcmp(request->method, "GET") != 0) {
+            response->status = 405;
+            return;
+        }
+        handle_setup_page(response);
+        return;
+    }
+
+    if (strcmp(request->target, "/network") == 0) {
+        if (strcmp(request->method, "POST") != 0) {
+            response->status = 405;
+            return;
+        }
+        handle_join_network(request, response);
+        return;
+    }
+
+    response->status = 404;
 }
 
 void app_main(void)

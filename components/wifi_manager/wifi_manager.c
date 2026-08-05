@@ -212,6 +212,20 @@ esp_err_t wifi_manager_start(void)
     return ESP_OK;
 }
 
+esp_err_t wifi_manager_join(const char *ssid, const char *password)
+{
+    if (ssid == NULL || ssid[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    wifi_store_credentials_t credentials = {0};
+    snprintf(credentials.ssid, sizeof(credentials.ssid), "%s", ssid);
+    snprintf(credentials.password, sizeof(credentials.password), "%s",
+             password != NULL ? password : "");
+
+    return wifi_store_save_network(&credentials);
+}
+
 const char *wifi_manager_setup_ssid(void)
 {
     return s_setup_ssid;
