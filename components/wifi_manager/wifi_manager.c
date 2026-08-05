@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "wifi_store.h"
 
@@ -39,8 +40,127 @@ static const char *TAG = "wifi_mgr";
  */
 #define SETUP_MAX_STATIONS 1
 
+/**
+ * @brief Delay between a lost connection and the next attempt at it, and how that
+ *        delay grows.
+ *
+ * Doubling from two seconds up to a minute is short enough that a router's own reboot
+ * is usually still within it by the second or third try, and long enough past that not
+ * to be spending airtime on a network that is not coming back soon. It never stops:
+ * the alternative — giving up — would mean a stored network surviving a router outage
+ * longer than this backoff does becomes a network this device has to be told about
+ * again, and forgetting is not something a failed connection attempt should decide.
+ */
+#define RECONNECT_BACKOFF_MIN_MS 2000u
+#define RECONNECT_BACKOFF_MAX_MS 60000u
+
+/**
+ * @brief Delay before the first connection attempt after a network is submitted.
+ *
+ * That submission is answered over the setup access point this device is about to try
+ * leaving. Connecting fast enough to succeed — and tear that access point down — before
+ * the response confirming the save has finished sending would turn a successful save
+ * into a page the phone never gets to see.
+ */
+#define INITIAL_CONNECT_DELAY_MS 3000u
+
 static char s_setup_ssid[WIFI_STORE_SSID_MAX + 1u];
 static char s_setup_password[WIFI_STORE_SETUP_PASSWORD_LEN + 1u];
+
+/** @brief Network the station role is trying to join, or empty if none is stored. */
+static char s_station_ssid[WIFI_STORE_SSID_MAX + 1u];
+static bool s_station_connected = false;
+static char s_station_ip[16]; /* "255.255.255.255" and a terminator. */
+static uint32_t s_backoff_ms = RECONNECT_BACKOFF_MIN_MS;
+
+/**
+ * @brief Whether the setup access point is currently up.
+ *
+ * Tracked here rather than read back from the driver because the two places that
+ * change it — a connection succeeding, one failing — already know which way they are
+ * changing it, and a flag they agree on is simpler than asking esp_wifi_get_mode() to
+ * settle a question this code already knows the answer to.
+ */
+static bool s_ap_visible = true;
+
+/** @brief Fires when a connection attempt is due — the first one, or a retry. */
+static esp_timer_handle_t s_reconnect_timer;
+
+static void reconnect_timer_callback(void *arg)
+{
+    (void)arg;
+
+    const esp_err_t err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "station: %s", esp_err_to_name(err));
+    }
+}
+
+/**
+ * @brief Stage @p ssid and @p password as the station's target. Does not connect.
+ *
+ * Kept apart from actually connecting because the two callers need different timing:
+ * a network read from flash at boot can be tried immediately, while one just submitted
+ * through the portal cannot — see ::INITIAL_CONNECT_DELAY_MS.
+ */
+static void configure_station(const char *ssid, const char *password)
+{
+    snprintf(s_station_ssid, sizeof(s_station_ssid), "%s", ssid);
+    s_station_connected = false;
+    s_station_ip[0] = '\0';
+    s_backoff_ms = RECONNECT_BACKOFF_MIN_MS;
+
+    wifi_config_t config = {0};
+    memcpy(config.sta.ssid, ssid, strlen(ssid));
+    memcpy(config.sta.password, password, strlen(password));
+
+    /* Harmless if the station role was not joined to anything — this only clears a
+     * previous target before the new one below replaces it. */
+    esp_wifi_disconnect();
+    /* Drop whatever attempt — an initial one, a retry — was already waiting. */
+    esp_timer_stop(s_reconnect_timer);
+
+    const esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "station: %s", esp_err_to_name(err));
+    }
+}
+
+/**
+ * @brief React to the station role losing its connection.
+ *
+ * Every disconnect — the first attempt failing, a router rebooting, walking out of
+ * range — arrives here the same way, and is answered the same way: bring the setup
+ * access point back so this device stays reachable, and try again later.
+ */
+static void handle_station_disconnected(const wifi_event_sta_disconnected_t *event)
+{
+    if (s_station_ssid[0] == '\0') {
+        /* Nothing is stored, so this is not a network this device is trying to hold —
+         * the station role was never asked to join anything. */
+        return;
+    }
+
+    ESP_LOGW(TAG, "station: disconnected from \"%s\" (reason %d)", s_station_ssid,
+             (int)event->reason);
+    s_station_connected = false;
+
+    if (!s_ap_visible) {
+        const esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+        if (err == ESP_OK) {
+            s_ap_visible = true;
+            ESP_LOGI(TAG, "setup: access point back up while offline");
+        } else {
+            ESP_LOGE(TAG, "setup: %s", esp_err_to_name(err));
+        }
+    }
+
+    ESP_LOGI(TAG, "station: retrying \"%s\" in %u ms", s_station_ssid,
+             (unsigned)s_backoff_ms);
+    esp_timer_start_once(s_reconnect_timer, (uint64_t)s_backoff_ms * 1000u);
+    s_backoff_ms = s_backoff_ms * 2u < RECONNECT_BACKOFF_MAX_MS ? s_backoff_ms * 2u
+                                                                : RECONNECT_BACKOFF_MAX_MS;
+}
 
 /**
  * @brief Log the driver's own view of setup mode.
@@ -76,6 +196,10 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         break;
     }
 
+    case WIFI_EVENT_STA_DISCONNECTED:
+        handle_station_disconnected((const wifi_event_sta_disconnected_t *)data);
+        break;
+
     default:
         /*
          * At debug level, not info. This existed to tell "no such event arrived" from
@@ -88,6 +212,40 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
          */
         ESP_LOGD(TAG, "setup: unhandled wifi event %ld", (long)id);
         break;
+    }
+}
+
+/**
+ * @brief React to the station role obtaining an address.
+ *
+ * The only reliable sign a connection succeeded: an association can still be followed
+ * by a DHCP lease that never arrives, and that failure belongs here, not to
+ * WIFI_EVENT_STA_CONNECTED.
+ */
+static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+
+    if (id != IP_EVENT_STA_GOT_IP) {
+        return;
+    }
+
+    const ip_event_got_ip_t *event = data;
+    snprintf(s_station_ip, sizeof(s_station_ip), IPSTR, IP2STR(&event->ip_info.ip));
+    s_station_connected = true;
+    s_backoff_ms = RECONNECT_BACKOFF_MIN_MS;
+
+    ESP_LOGI(TAG, "station: joined \"%s\", %s", s_station_ssid, s_station_ip);
+
+    if (s_ap_visible) {
+        const esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (err == ESP_OK) {
+            s_ap_visible = false;
+            ESP_LOGI(TAG, "setup: access point down, network reachable directly");
+        } else {
+            ESP_LOGE(TAG, "setup: %s", esp_err_to_name(err));
+        }
     }
 }
 
@@ -133,6 +291,13 @@ esp_err_t wifi_manager_start(void)
         return ESP_FAIL;
     }
 
+    /* esp_wifi_scan_start() only works in WIFI_MODE_STA or WIFI_MODE_APSTA, and the
+     * station control block it scans through — and a stored network later connects
+     * through — is created from this netif when Wi-Fi starts below. */
+    if (esp_netif_create_default_wifi_sta() == NULL) {
+        return ESP_FAIL;
+    }
+
     const wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     err = esp_wifi_init(&init);
     if (err != ESP_OK) {
@@ -153,6 +318,21 @@ esp_err_t wifi_manager_start(void)
 
     err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                              &on_wifi_event, NULL, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_ip_event,
+                                             NULL, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const esp_timer_create_args_t reconnect_timer_args = {
+        .callback = &reconnect_timer_callback,
+        .name = "wifi_reconnect",
+    };
+    err = esp_timer_create(&reconnect_timer_args, &s_reconnect_timer);
     if (err != ESP_OK) {
         return err;
     }
@@ -181,7 +361,7 @@ esp_err_t wifi_manager_start(void)
     memcpy(config.ap.ssid, s_setup_ssid, strlen(s_setup_ssid));
     memcpy(config.ap.password, s_setup_password, strlen(s_setup_password));
 
-    err = esp_wifi_set_mode(WIFI_MODE_AP);
+    err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) {
         return err;
     }
@@ -201,6 +381,41 @@ esp_err_t wifi_manager_start(void)
      * connections sends whoever reads it looking for the wrong fault. */
     ESP_LOGI(TAG, "setup: \"%s\" ready, password is on the panel", s_setup_ssid);
 
+    wifi_store_credentials_t stored;
+    if (wifi_store_load_network(&stored)) {
+        /* Nothing is answering on the setup access point yet at this point in boot —
+         * the HTTP server does not exist until later in app_main — so there is no
+         * in-flight response for an immediate connection attempt to race with here,
+         * unlike the portal case below. */
+        configure_station(stored.ssid, stored.password);
+        const esp_err_t connect_err = esp_wifi_connect();
+        if (connect_err != ESP_OK) {
+            ESP_LOGE(TAG, "station: %s", esp_err_to_name(connect_err));
+        }
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_join(const char *ssid, const char *password)
+{
+    if (ssid == NULL || ssid[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    wifi_store_credentials_t credentials = {0};
+    snprintf(credentials.ssid, sizeof(credentials.ssid), "%s", ssid);
+    snprintf(credentials.password, sizeof(credentials.password), "%s",
+             password != NULL ? password : "");
+
+    const esp_err_t err = wifi_store_save_network(&credentials);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    configure_station(credentials.ssid, credentials.password);
+    esp_timer_start_once(s_reconnect_timer, (uint64_t)INITIAL_CONNECT_DELAY_MS * 1000u);
+
     return ESP_OK;
 }
 
@@ -212,4 +427,107 @@ const char *wifi_manager_setup_ssid(void)
 const char *wifi_manager_setup_password(void)
 {
     return s_setup_password;
+}
+
+/*
+ * The three getters below are written from the event task (a connection succeeding or
+ * failing) and from whichever task calls wifi_manager_join() (the HTTP server's), and
+ * read from whichever task the caller happens to be — normally app_main's, once a
+ * second. None of that is locked. The values only ever change together and only ever
+ * grow more current, so the one thing a reader can see that a writer did not intend is
+ * a display refresh one second late, or a network name mid-update on the one occasion
+ * a redraw and a save land in the same instant — not a corrupted read, since every
+ * buffer here is fixed-size and always left NUL-terminated by whichever snprintf wrote
+ * it last. A mutex would buy correctness this state does not need at a cost — code the
+ * display path has to run through on every single redraw — that it does not have to
+ * pay.
+ */
+
+const char *wifi_manager_station_ssid(void)
+{
+    return s_station_ssid;
+}
+
+bool wifi_manager_station_connected(void)
+{
+    return s_station_connected;
+}
+
+const char *wifi_manager_station_ip(void)
+{
+    return s_station_ip;
+}
+
+/**
+ * @brief True if @p ssid already appears among the first @p count entries of @p out.
+ *
+ * A network reachable through more than one access point — a mesh, a repeater — is one
+ * choice to the person provisioning, not several identical-looking rows.
+ */
+static bool already_listed(const wifi_manager_network_t *out, uint16_t count,
+                           const char *ssid)
+{
+    for (uint16_t i = 0; i < count; i++) {
+        if (strcmp(out[i].ssid, ssid) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+esp_err_t wifi_manager_scan(wifi_manager_network_t *out, uint16_t *count)
+{
+    const uint16_t capacity = *count;
+    *count = 0;
+
+    if (capacity == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const wifi_scan_config_t config = {
+        .show_hidden = false,
+    };
+
+    esp_err_t err = esp_wifi_scan_start(&config, true);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "scan: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    /*
+     * Static, and zeroed before use, for the same reason as everywhere else a buffer
+     * this size appears: it does not belong on a task's stack. The zeroing matters on
+     * its own — an SSID is up to 32 arbitrary octets in a 33-byte field, and nothing in
+     * the driver's contract promises the 33rd byte is a terminator. ESP-IDF's own scan
+     * example zeroes this array before the scan and then reads every ssid field as a C
+     * string, so this does the same rather than trust a guarantee that is not written
+     * down anywhere.
+     */
+    static wifi_ap_record_t s_records[WIFI_MANAGER_SCAN_MAX];
+    memset(s_records, 0, sizeof(s_records));
+
+    uint16_t fetched = capacity < WIFI_MANAGER_SCAN_MAX ? capacity : WIFI_MANAGER_SCAN_MAX;
+    err = esp_wifi_scan_get_ap_records(&fetched, s_records);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "scan: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    uint16_t written = 0;
+    for (uint16_t i = 0; i < fetched && written < capacity; i++) {
+        const char *ssid = (const char *)s_records[i].ssid;
+
+        if (ssid[0] == '\0' || already_listed(out, written, ssid)) {
+            continue;
+        }
+
+        snprintf(out[written].ssid, sizeof(out[written].ssid), "%s", ssid);
+        out[written].secured = s_records[i].authmode != WIFI_AUTH_OPEN;
+        written++;
+    }
+
+    *count = written;
+    ESP_LOGI(TAG, "scan: %u network(s) in range, %u shown", (unsigned)fetched,
+             (unsigned)written);
+    return ESP_OK;
 }
