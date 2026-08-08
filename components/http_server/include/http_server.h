@@ -52,11 +52,35 @@ typedef struct {
     const char *method;
     /** Request target, with any query string still attached. */
     const char *target;
+    /**
+     * Raw header block: everything between the request line and the blank line that
+     * ends it, CRLF-delimited exactly as it arrived. Not meant to be scanned by hand —
+     * see ::http_request_header.
+     */
+    const char *headers;
     /** Request body, NUL-terminated, or an empty string when there was none. */
     const char *body;
     /** Body length in bytes, excluding the terminator. */
     size_t body_length;
 } http_request_t;
+
+/**
+ * @brief Find header @p name among @p headers.
+ *
+ * A lookup rather than a parsed table: this server has at most a couple of headers any
+ * handler will ever ask for, and a name/value table for that is more code than the
+ * handful of call sites it would serve.
+ *
+ * @param headers      A request's ::http_request_t::headers.
+ * @param name         Header name, matched case-insensitively, as HTTP requires.
+ * @param value_length Receives the value's length. The value is not NUL-terminated at
+ *                      that point — whatever follows in the request comes right after
+ *                      it, usually '\r' — so a caller comparing it must use the length
+ *                      rather than strlen().
+ * @return Pointer to the value's first non-whitespace byte, or NULL if @p name is not
+ *         present.
+ */
+const char *http_request_header(const char *headers, const char *name, size_t *value_length);
 
 /**
  * @brief What a handler fills in.
