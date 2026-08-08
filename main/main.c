@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "board.h"
+#include "device_auth.h"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
@@ -56,6 +57,17 @@ static const char *TAG = "boot";
  * codebase has already been careful to avoid everywhere else a response is assembled.
  */
 static char s_network_list[WIFI_MANAGER_SCAN_MAX * NETWORK_ITEM_BUDGET];
+
+/**
+ * @brief This device's power state, as far as anything has told it so far.
+ *
+ * Not backed by anything electrical yet — see ::handle_power. Held in memory because
+ * that is honestly what it is: what the hub last asked for, not a measurement. Once
+ * the PWR_LED sense circuit exists, the real state is read from the machine itself on
+ * every boot, and this placeholder is replaced rather than persisted forward — a
+ * remembered guess is not a fallback worth keeping once the truth is available.
+ */
+static bool s_power_on = false;
 
 /*
  * A brief flash on a long period rather than an even blink. It reads as a
@@ -343,6 +355,7 @@ static const char SETUP_PAGE[] =
     "</style></head><body><h1>PC power controller</h1>"
     "<p>Setup mode. This device is not on a network yet.</p>"
     "<dl><dt>Access point</dt><dd>%s</dd>"
+    "<dt>API key</dt><dd>%s</dd>"
     "<dt>Firmware</dt><dd>%s</dd></dl>"
     "<h2>Join a network</h2>"
     "<form method=\"post\" action=\"/network\">"
@@ -351,7 +364,14 @@ static const char SETUP_PAGE[] =
     "<button type=\"submit\">Join</button>"
     "</form></body></html>";
 
-/** @brief Confirmation shown after a network is saved. */
+/**
+ * @brief Confirmation shown after a network is saved.
+ *
+ * Repeats the API key rather than pointing back at the setup page for it: this is the
+ * last moment that page is guaranteed to still be reachable, since the connection
+ * attempt this same submission just started can succeed — and take the setup access
+ * point down with it — before anyone reloads anything.
+ */
 static const char JOINED_PAGE[] =
     "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -359,9 +379,12 @@ static const char JOINED_PAGE[] =
     "body{font:16px/1.5 system-ui,-apple-system,sans-serif;margin:0;padding:1.5rem;"
     "background:#14161a;color:#e8eaed}"
     "h1{font-size:1.2rem;margin:0 0 .5rem}p{margin:0;color:#9aa0a6}"
+    "dt{font-size:.8rem;color:#9aa0a6;text-transform:uppercase;letter-spacing:.05em;"
+    "margin-top:1rem}"
     "dd{font-family:ui-monospace,monospace;color:#8ab4f8;margin:.15rem 0 0}"
     "</style></head><body><h1>Saved</h1>"
-    "<p>This device will use</p><dd>%s</dd></body></html>";
+    "<dl><dt>Network</dt><dd>%s</dd>"
+    "<dt>API key</dt><dd>%s</dd></dl></body></html>";
 
 /** @brief Serve the setup page: access point details, and networks in range. */
 static void handle_setup_page(http_response_t *response)
@@ -370,8 +393,8 @@ static void handle_setup_page(http_response_t *response)
 
     const int written =
         snprintf(response->body, response->body_capacity, SETUP_PAGE,
-                 wifi_manager_setup_ssid(), esp_app_get_description()->version,
-                 s_network_list);
+                 wifi_manager_setup_ssid(), device_auth_api_key(),
+                 esp_app_get_description()->version, s_network_list);
 
     if (written < 0 || (size_t)written >= response->body_capacity) {
         /* Truncated output would be a broken page. Reporting a server error says which
@@ -521,7 +544,8 @@ static void handle_join_network(const http_request_t *request, http_response_t *
     append_escaped(escaped, sizeof(escaped), ssid);
 
     const int written =
-        snprintf(response->body, response->body_capacity, JOINED_PAGE, escaped);
+        snprintf(response->body, response->body_capacity, JOINED_PAGE, escaped,
+                 device_auth_api_key());
     if (written < 0 || (size_t)written >= response->body_capacity) {
         response->status = 500;
         return;
@@ -531,6 +555,144 @@ static void handle_join_network(const http_request_t *request, http_response_t *
     response->status = 200;
     response->content_type = "text/html; charset=utf-8";
     response->body_length = (size_t)written;
+}
+
+/**
+ * @brief Find boolean field @p name in a JSON body shaped like {"name":true}.
+ *
+ * Not a JSON parser: it looks for the literal quoted key, skips whitespace and a
+ * colon, and accepts exactly the tokens true or false. Anything else — the field
+ * missing, a different type, extra fields this device has no use for — is for the
+ * caller to refuse, not for this to guess at. A hub sending anything else is a hub
+ * sending the wrong request, not a request this device should try to honour part of.
+ */
+static bool find_json_bool(const char *body, const char *name, bool *out)
+{
+    char pattern[24];
+    const int pattern_length = snprintf(pattern, sizeof(pattern), "\"%s\"", name);
+    if (pattern_length <= 0 || (size_t)pattern_length >= sizeof(pattern)) {
+        return false;
+    }
+
+    const char *key = strstr(body, pattern);
+    if (key == NULL) {
+        return false;
+    }
+
+    const char *value = key + pattern_length;
+    while (*value == ' ' || *value == '\t' || *value == '\n' || *value == '\r') {
+        value++;
+    }
+    if (*value != ':') {
+        return false;
+    }
+    value++;
+    while (*value == ' ' || *value == '\t' || *value == '\n' || *value == '\r') {
+        value++;
+    }
+
+    if (strncmp(value, "true", 4) == 0) {
+        *out = true;
+        return true;
+    }
+    if (strncmp(value, "false", 5) == 0) {
+        *out = false;
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * @brief Whether @p request carries this device's API key.
+ *
+ * Not a check applied upstream of every handler, because two of them must not require
+ * it: the key lives in NVS from the moment this device first boots, but it is not
+ * readable by anyone until the setup page shows it, and a check that ran in front of
+ * that page too would lock a fresh device out of the one place its key can be read.
+ */
+static bool authorized(const http_request_t *request)
+{
+    size_t key_length = 0;
+    const char *key = http_request_header(request->headers, "X-API-Key", &key_length);
+    return key != NULL && device_auth_verify(key, key_length);
+}
+
+/**
+ * @brief Answer a request that failed ::authorized.
+ *
+ * Missing and wrong keys get the same status and the same message, matching the
+ * hub's own choice for the same reason: a response that distinguished them would tell
+ * whoever is guessing which case they are in.
+ */
+static void respond_unauthorized(http_response_t *response)
+{
+    static const char BODY[] = "{\"detail\":\"Invalid or missing API key\"}";
+
+    memcpy(response->body, BODY, sizeof(BODY) - 1u);
+    response->status = 401;
+    response->content_type = "application/json";
+    response->body_length = sizeof(BODY) - 1u;
+}
+
+/** @brief Write the current (simulated) power state as the response body. */
+static void write_power_state(http_response_t *response)
+{
+    const int written = snprintf(response->body, response->body_capacity, "{\"on\":%s}",
+                                 s_power_on ? "true" : "false");
+    if (written < 0 || (size_t)written >= response->body_capacity) {
+        response->status = 500;
+        return;
+    }
+
+    response->status = 200;
+    response->content_type = "application/json";
+    response->body_length = (size_t)written;
+}
+
+/**
+ * @brief GET and PUT for /v1/power.
+ *
+ * There is no relay to drive yet, and no optocoupler to sense the machine's own power
+ * light through — s_power_on is the whole of this device's power state until that
+ * hardware exists. The endpoint is real, not a placeholder that will need a different
+ * shape later: a hub built against this contract now keeps working unchanged once a
+ * PUT here starts a real pulse instead of only remembering that one was asked for.
+ */
+static void handle_power(const http_request_t *request, http_response_t *response)
+{
+    if (strcmp(request->method, "GET") == 0) {
+        write_power_state(response);
+        return;
+    }
+
+    if (strcmp(request->method, "PUT") == 0) {
+        bool on = false;
+        if (!find_json_bool(request->body, "on", &on)) {
+            response->status = 400;
+            return;
+        }
+
+        s_power_on = on;
+        ESP_LOGI(TAG, "power: set to %s (no relay wired yet)", on ? "on" : "off");
+        write_power_state(response);
+        return;
+    }
+
+    response->status = 405;
+}
+
+/** @brief POST for /v1/power/toggle. */
+static void handle_power_toggle(const http_request_t *request, http_response_t *response)
+{
+    if (strcmp(request->method, "POST") != 0) {
+        response->status = 405;
+        return;
+    }
+
+    s_power_on = !s_power_on;
+    ESP_LOGI(TAG, "power: toggled to %s (no relay wired yet)", s_power_on ? "on" : "off");
+    write_power_state(response);
 }
 
 /**
@@ -559,6 +721,22 @@ static void on_http_request(const http_request_t *request, http_response_t *resp
             return;
         }
         handle_join_network(request, response);
+        return;
+    }
+
+    const bool is_power = strcmp(request->target, "/v1/power") == 0;
+    const bool is_power_toggle = strcmp(request->target, "/v1/power/toggle") == 0;
+
+    if (is_power || is_power_toggle) {
+        if (!authorized(request)) {
+            respond_unauthorized(response);
+            return;
+        }
+        if (is_power) {
+            handle_power(request, response);
+        } else {
+            handle_power_toggle(request, response);
+        }
         return;
     }
 
@@ -611,6 +789,13 @@ void app_main(void)
                  (unsigned)SSD1306_TEXT_COLUMNS, (unsigned)SSD1306_TEXT_ROWS);
     } else {
         ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
+    }
+
+    /* Before Wi-Fi: the setup page needs a key to show, and generating one is a local
+     * operation that has nothing to wait for. */
+    const esp_err_t auth = device_auth_init();
+    if (auth != ESP_OK) {
+        ESP_LOGE(TAG, "auth: %s", esp_err_to_name(auth));
     }
 
     const esp_err_t wifi = wifi_manager_start();

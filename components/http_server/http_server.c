@@ -73,6 +73,7 @@ static const char *status_text(int status)
     switch (status) {
     case 200: return "OK";
     case 400: return "Bad Request";
+    case 401: return "Unauthorized";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
     case 413: return "Content Too Large";
@@ -238,6 +239,33 @@ static bool parse_request_line(void)
     return true;
 }
 
+const char *http_request_header(const char *headers, const char *name, size_t *value_length)
+{
+    const size_t name_length = strlen(name);
+    const char *line = headers;
+
+    while (line[0] != '\0' && !(line[0] == '\r' && line[1] == '\n')) {
+        if (strncasecmp(line, name, name_length) == 0 && line[name_length] == ':') {
+            const char *value = line + name_length + 1u;
+            while (*value == ' ' || *value == '\t') {
+                value++;
+            }
+
+            const char *end = strstr(value, "\r\n");
+            *value_length = end != NULL ? (size_t)(end - value) : strlen(value);
+            return value;
+        }
+
+        const char *next = strstr(line, "\r\n");
+        if (next == NULL) {
+            break;
+        }
+        line = next + 2;
+    }
+
+    return NULL;
+}
+
 /** @brief Result of looking for Content-Length. */
 typedef enum {
     LENGTH_ABSENT,
@@ -361,9 +389,15 @@ static void serve_connection(int sock)
         return;
     }
 
+    /* receive_head() only returns HEAD_OK once "\r\n\r\n" has been found in s_head, so
+     * the first "\r\n" — the end of the request line — is guaranteed to exist too. */
+    const char *header_start = strstr(s_head, "\r\n");
+    header_start = header_start != NULL ? header_start + 2 : s_head;
+
     const http_request_t request = {
         .method = s_method,
         .target = s_target,
+        .headers = header_start,
         .body = s_body,
         .body_length = declared,
     };
