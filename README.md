@@ -87,8 +87,8 @@ closed binary blob with no alternative, and FreeRTOS, lwIP and NVS come with it.
 
 ## Building
 
-Requires [ESP-IDF v5.5](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32c3/get-started/)
-with the `esp32c3` target installed.
+Requires [ESP-IDF v5.5.5 or newer](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32c3/get-started/)
+with the `esp32c3` target installed. The patch version is a minimum, not a suggestion.
 
 ```sh
 . "$IDF_PATH/export.sh"      # or: . ~/esp/esp-idf/export.sh
