@@ -99,7 +99,21 @@ const char *device_auth_api_key(void)
 
 bool device_auth_verify(const char *presented, size_t presented_length)
 {
-    if (presented_length != strlen(s_api_key)) {
+    const size_t key_length = strlen(s_api_key);
+
+    /*
+     * An unset key refuses everything rather than matching everything. s_api_key is an
+     * empty string until device_auth_init() fills it, and that call can return early —
+     * NVS unusable, the namespace failing to open, a read or a write failing — leaving it
+     * empty while the caller carries on. Without this, the length check below would pass
+     * for an empty presented value and the loop would find zero differing bytes across
+     * zero bytes, so an empty header would authenticate.
+     */
+    if (key_length == 0u) {
+        return false;
+    }
+
+    if (presented_length != key_length) {
         return false;
     }
 
