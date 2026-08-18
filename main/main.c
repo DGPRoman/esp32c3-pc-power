@@ -40,13 +40,14 @@
  * @brief Bytes reserved per rendered network in the list below.
  *
  * An SSID is at most 32 octets, and HTML-escaping the worst case — every one of them a
- * character that expands to an entity — multiplies that by up to five. Each entry
+ * character that expands to an entity — multiplies that by up to six: "&quot;" is the
+ * longest entity ::append_escaped emits, and it is six characters, not five. Each entry
  * shows the escaped name twice, once as the option's value and once as what the person
  * choosing it reads, plus a fixed allowance for the surrounding markup and the "(open)"
- * suffix: generous enough that the per-item snprintf below never truncates in
- * practice, while the check that follows it means nothing breaks on the day it does.
+ * suffix: enough that the per-item snprintf below never truncates in practice, while the
+ * truncation check that follows it means nothing breaks on the day that reasoning is wrong.
  */
-#define NETWORK_ITEM_BUDGET (2u * (WIFI_MANAGER_SSID_MAX * 5u) + 48u)
+#define NETWORK_ITEM_BUDGET (2u * (WIFI_MANAGER_SSID_MAX * 6u) + 48u)
 
 static const char *TAG = "boot";
 
@@ -269,6 +270,14 @@ static void build_network_list(void)
                      "<option value=\"%s\">%s%s</option>", escaped, escaped,
                      networks[i].secured ? "" : " (open)");
         if (written < 0) {
+            break;
+        }
+        if ((size_t)written >= sizeof(s_network_list) - pos) {
+            /* Truncated. snprintf reports the length it would have written, not the
+             * length it did, so adding that here would move pos past the end of the
+             * buffer — and the guard above, computing a size_t difference, would wrap to
+             * an enormous value rather than stopping the next pass. What fits is already
+             * written; stop with it. */
             break;
         }
         pos += (size_t)written;
@@ -606,10 +615,12 @@ static bool find_json_bool(const char *body, const char *name, bool *out)
 /**
  * @brief Whether @p request carries this device's API key.
  *
- * Not a check applied upstream of every handler, because two of them must not require
- * it: the key lives in NVS from the moment this device first boots, but it is not
- * readable by anyone until the setup page shows it, and a check that ran in front of
- * that page too would lock a fresh device out of the one place its key can be read.
+ * Not a check applied upstream of every handler: the key lives in NVS from the moment
+ * this device first boots, but it is not readable by anyone until the setup page shows
+ * it, and a check that ran in front of that page on a fresh device would lock it out of
+ * the one place its key can be read. So the provisioning routes are exempt while there
+ * is no network to reach them from — see ::on_http_request, which decides that — and
+ * carry the same check as everything else once there is.
  */
 static bool authorized(const http_request_t *request)
 {
@@ -706,9 +717,24 @@ static void handle_power_toggle(const http_request_t *request, http_response_t *
  */
 static void on_http_request(const http_request_t *request, http_response_t *response)
 {
+    /*
+     * The provisioning routes are open only while this device has nowhere else to be
+     * reached. The setup access point stays up for the life of the process, so "still
+     * provisioning" cannot mean "the access point is up": once a network is joined,
+     * these two routes answer on that network as well, and the page's own API key is
+     * the thing a caller would be reading it to obtain. Past that point they still
+     * answer, but only to someone who already holds the key — so recovering it without
+     * a reflash stays possible, and learning it does not.
+     */
+    const bool provisioning_open = !wifi_manager_station_connected();
+
     if (strcmp(request->target, "/") == 0) {
         if (strcmp(request->method, "GET") != 0) {
             response->status = 405;
+            return;
+        }
+        if (!provisioning_open && !authorized(request)) {
+            respond_unauthorized(response);
             return;
         }
         handle_setup_page(response);
@@ -718,6 +744,10 @@ static void on_http_request(const http_request_t *request, http_response_t *resp
     if (strcmp(request->target, "/network") == 0) {
         if (strcmp(request->method, "POST") != 0) {
             response->status = 405;
+            return;
+        }
+        if (!provisioning_open && !authorized(request)) {
+            respond_unauthorized(response);
             return;
         }
         handle_join_network(request, response);
