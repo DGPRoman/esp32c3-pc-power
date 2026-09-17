@@ -58,8 +58,18 @@ own style. Those commits are left alone: rewriting them would change every
 hash and break the links from issues and pull requests. The log therefore has
 a visible seam, which is the honest cost of the change.
 
-What it buys is release automation. This repository has no version anywhere and
-no tags at all, which for firmware is the more awkward gap of the three — a
-device in a case cannot be asked what it is running unless the build knows.
-`.github/workflows/release.yml` derives a version, a tag and a changelog from
-the commit types, tracking the version in `version.txt`.
+The convention was adopted for release automation, and that automation has since
+been removed. release-please can only open its pull request if the repository
+allows GitHub Actions to create and approve pull requests — a permission that
+also lets a workflow approve one, which is wider than the automation was worth on
+a repository whose pull requests are reviewed by hand anyway.
+
+What the convention still buys is a log that says what each change *is* rather
+than only what it touched, and a history a tool can read. Tags and a changelog
+can be derived from it later, or the automation restored behind a token of its
+own, without rewriting anything a second time.
+
+This repository is left with no version anywhere and no tags at all, which for
+firmware is the more awkward gap of the three: a device in a case cannot be asked
+what it is running unless the build knows. That is now an open problem rather than
+a solved one.
