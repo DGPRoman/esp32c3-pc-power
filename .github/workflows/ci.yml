@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: nothing here writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Build and run
+        # No ESP toolchain and no board. The suite compiles the pure logic for the
+        # host with -Werror and runs it under ASan and UBSan, which is what makes
+        # the parser tests worth feeding malformed input.
+        run: make -C test/host
+
+  firmware:
+    name: Firmware build
+    runs-on: ubuntu-latest
+    # Pinned to the minimum the README states. A floating tag would mean a green
+    # run here says nothing about the version anyone is told to build with.
+    container: espressif/idf:v5.5.5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Trust the checkout
+        # The container runs as root and the checkout is owned by the runner user,
+        # which git refuses to touch. idf.py reads the revision for the build.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          . "$IDF_PATH/export.sh"
+          idf.py build 2>&1 | tee build.log
+
+      - name: Fail on any compiler warning
+        # Checked against the log rather than by forcing -Werror into the build.
+        # ESP-IDF compiles its own components with this one, and a flag pushed in
+        # from outside would fail the run on a warning in the framework that
+        # nothing in this repository can fix.
+        run: |
+          if grep -E ": (warning|note: in expansion of macro)" build.log \
+              | grep -vE "/opt/esp/idf/|/root/.espressif/"; then
+            echo "::error::the firmware build produced warnings in this repository's code"
+            exit 1
+          fi
+          echo "No warnings from this repository's own sources."
+
+      - name: Report the binary size
+        # Not a gate. 4 MB of flash is a lot of room, and a threshold nobody has a
+        # reason for is a threshold that gets raised rather than read.
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py size

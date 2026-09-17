@@ -18,6 +18,9 @@ sdkconfig.ci
 managed_components/
 dependencies.lock
 
+# Host test binary. Built by `make -C test/host`, never committed.
+test/host/host-tests
+
 # Editors and OS
 .idea/
 .vscode/

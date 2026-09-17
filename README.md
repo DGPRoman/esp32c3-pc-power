@@ -1,5 +1,7 @@
 # esp32c3-pc-power
 
+[![CI](https://github.com/DGPRoman/esp32c3-pc-power/actions/workflows/ci.yml/badge.svg)](https://github.com/DGPRoman/esp32c3-pc-power/actions/workflows/ci.yml)
+
 Remote power control for a desktop PC, on an ESP32-C3.
 
 The device sits inside the case and drives the motherboard's front-panel power
@@ -98,6 +100,24 @@ idf.py -p /dev/ttyACM0 flash monitor
 
 The board appears as `/dev/ttyACM0` over native USB, with no driver needed. Exit
 the monitor with `Ctrl+]`.
+
+## Testing
+
+The components that are pure logic — the request parser, the font table, the
+framebuffer — are tested on a workstation, with no toolchain and no board:
+
+```sh
+make -C test/host
+```
+
+That compiles them for the host against thin stand-ins for the four ESP-IDF
+headers they include, with warnings as errors, and runs the suite under
+AddressSanitizer and UndefinedBehaviorSanitizer. The parser tests feed it
+truncated, oversized and duplicated input on purpose, so an overread the
+assertions happen not to notice is still caught.
+
+Everything that touches a peripheral is not covered here and is not pretended to
+be: those need the chip.
 
 ## Configuration
 
