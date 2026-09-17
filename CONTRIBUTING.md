@@ -47,9 +47,10 @@ shell script, identical to the one the sibling repositories use, so nothing
 here depends on a toolchain this repository does not otherwise need. CI runs
 that same file over every commit in a pull request.
 
-Note that `.github/workflows/commit-messages.yml` is the only workflow that
-checks anything about a change so far: there is still no build or static
-analysis in CI. That is tracked separately and this does not stand in for it.
+A message that reads well is not evidence that the change is right, and this
+gate does not pretend otherwise. `.github/workflows/ci.yml` is what builds the
+firmware, fails the run on a warning from this repository's own sources, and
+runs the host tests under the sanitisers.
 
 ### Why this changed
 
