@@ -1,0 +1,16 @@
+# The framework version this firmware is built against, declared where the build
+# can act on it. The README states the same floor in prose, which every patch
+# release since satisfies equally — nothing there stops a clone from building
+# against an older ESP-IDF and producing firmware that differs in ways this
+# repository cannot see.
+#
+# The lower bound is the floor the README names. The upper bound is not a
+# prediction that 6.0 breaks something: it is the refusal to claim, today, that
+# a major release nobody has compiled this against is fine.
+#
+# No third-party dependencies are declared, and none are wanted — the drivers
+# here are written against the reference manual. This manifest exists for the
+# `idf` requirement alone.
+dependencies:
+  idf:
+    version: ">=5.5.5,<6.0"

@@ -30,8 +30,10 @@ jobs:
   firmware:
     name: Firmware build
     runs-on: ubuntu-latest
-    # Pinned to the minimum the README states. A floating tag would mean a green
-    # run here says nothing about the version anyone is told to build with.
+    # Pinned to the minimum `main/idf_component.yml` declares. A floating tag
+    # would mean a green run here says nothing about the version anyone is told
+    # to build with, and building above the floor would leave the floor itself
+    # untested.
     container: espressif/idf:v5.5.5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

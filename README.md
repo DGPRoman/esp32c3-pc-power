@@ -96,7 +96,11 @@ demonstrated patience rather than anything about the hardware.
 ## Building
 
 Requires [ESP-IDF v5.5.5 or newer](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32c3/get-started/)
-with the `esp32c3` target installed. The patch version is a minimum, not a suggestion.
+with the `esp32c3` target installed. The patch version is a minimum, not a
+suggestion, and `main/idf_component.yml` enforces it: an older framework fails
+the build instead of quietly producing different firmware. The same file caps
+the range below 6.0, which is a statement about what has been compiled rather
+than a prediction about what breaks.
 
 ```sh
 . "$IDF_PATH/export.sh"      # or: . ~/esp/esp-idf/export.sh
