@@ -87,6 +87,12 @@ server are all implemented in this repository rather than pulled in. ESP-IDF is
 used for the parts where that is not a real option: the Wi-Fi MAC and PHY are a
 closed binary blob with no alternative, and FreeRTOS, lwIP and NVS come with it.
 
+One thing is adopted rather than written: the 5×7 glyph table in
+`components/font5x7` is the classic public-domain GLCD font, and the file says
+so. The text renderer around it — the indexing, the column layout and the 72×40
+geometry — is written here. Drawing ninety-five glyphs by hand would have
+demonstrated patience rather than anything about the hardware.
+
 ## Building
 
 Requires [ESP-IDF v5.5.5 or newer](https://docs.espressif.com/projects/esp-idf/en/v5.5.5/esp32c3/get-started/)
@@ -134,7 +140,7 @@ Early development. The HTTP contract is not stable yet.
 - [x] Register-level GPIO — status LED
 - [x] Register-level I²C master, bus scan
 - [x] SSD1306 driver — framebuffer, 72×40 geometry
-- [x] 5×7 font and text rendering
+- [x] Text rendering over an adopted 5×7 glyph table
 - [x] Setup-mode access point, credentials in NVS
 - [x] HTTP/1.1 server on BSD sockets
 - [x] Provisioning portal, joining a network

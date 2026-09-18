@@ -1,5 +1,21 @@
 #include "font5x7.h"
 
+/*
+ * The glyph table below is adopted, not authored here: it is the classic 5x7
+ * GLCD font that has shipped with LCD libraries for decades and is treated as
+ * public domain. It carries no licence notice to reproduce, and this comment
+ * exists because a reader who recognises the table deserves to be told rather
+ * than left to notice.
+ *
+ * Fifty-two of its ninety-five rows are byte-identical to Adafruit-GFX's
+ * glcdfont.c; the forty-three that differ are glyphs Adafruit redrew. It
+ * therefore descends from the table Adafruit began with rather than from
+ * Adafruit's own version, so nothing here is copied from a BSD-licensed work.
+ *
+ * What is written here is everything around it: the indexing, the column
+ * layout, and the 72x40 geometry the ssd1306 component renders into.
+ */
+
 /** @brief First character the table covers: space. */
 #define FIRST_CHAR 0x20u
 
