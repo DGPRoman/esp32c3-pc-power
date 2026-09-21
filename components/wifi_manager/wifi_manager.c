@@ -127,6 +127,62 @@ static void configure_station(const char *ssid, const char *password)
 }
 
 /**
+ * @brief Arm the one reconnect timer, replacing whatever was pending.
+ *
+ * Stopped before it is started. esp_timer_start_once refuses a timer that is
+ * already running, so without the stop the return value would be
+ * ESP_ERR_INVALID_STATE half the time for a perfectly ordinary reason — and a
+ * check that cries wolf is a check nobody keeps. With it, a failure here means
+ * something is actually wrong.
+ *
+ * Both callers race, and deliberately are not locked against each other. The
+ * portal's HTTP task calls this after submitting a network; the disconnect that
+ * same submission causes is delivered to the Wi-Fi event task, which calls it too.
+ * Holding a mutex across the esp_wifi_* calls between them is how this driver
+ * would come to wait on the event task from inside a handler the event task runs.
+ *
+ * The race is survivable and the outcome is stated rather than hoped for: whoever
+ * arms last wins, and both delays — 3 s for the initial attempt, 2 s for the first
+ * backoff — end in a connection attempt. Losing the race costs at most one second
+ * of the window that exists so a setup page's response can finish sending. It
+ * cannot leave the station with nothing scheduled.
+ *
+ * @param delay_ms How long to wait before trying to connect.
+ * @param reason   What to call this in the log.
+ */
+static void arm_reconnect(uint32_t delay_ms, const char *reason)
+{
+    /* An unarmed timer answers ESP_ERR_INVALID_STATE here, which is the expected
+     * case and not an error. */
+    esp_timer_stop(s_reconnect_timer);
+
+    const esp_err_t err =
+        esp_timer_start_once(s_reconnect_timer, (uint64_t)delay_ms * 1000u);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "station: %s, connecting to \"%s\" in %u ms", reason, s_station_ssid,
+                 (unsigned)delay_ms);
+        return;
+    }
+
+    /*
+     * Every reconnection in this driver goes through this one timer, so nothing
+     * else will bring the station back. Connecting immediately is worse than the
+     * delay it skips and far better than a device that silently never joins: the
+     * delay exists to let an HTTP response drain, not to make the attempt correct.
+     *
+     * This used to be dropped without a word, which is the reason it is worth
+     * handling at all — the symptom arrives much later, as a device that did not
+     * join a network, with nothing in the log pointing here.
+     */
+    ESP_LOGE(TAG, "station: could not schedule the attempt (%s); connecting now",
+             esp_err_to_name(err));
+    const esp_err_t connect_err = esp_wifi_connect();
+    if (connect_err != ESP_OK) {
+        ESP_LOGE(TAG, "station: %s", esp_err_to_name(connect_err));
+    }
+}
+
+/**
  * @brief React to the station role losing its connection.
  *
  * Every disconnect — the first attempt failing, a router rebooting, walking out of
@@ -155,9 +211,7 @@ static void handle_station_disconnected(const wifi_event_sta_disconnected_t *eve
         }
     }
 
-    ESP_LOGI(TAG, "station: retrying \"%s\" in %u ms", s_station_ssid,
-             (unsigned)s_backoff_ms);
-    esp_timer_start_once(s_reconnect_timer, (uint64_t)s_backoff_ms * 1000u);
+    arm_reconnect(s_backoff_ms, "retrying");
     s_backoff_ms = s_backoff_ms * 2u < RECONNECT_BACKOFF_MAX_MS ? s_backoff_ms * 2u
                                                                 : RECONNECT_BACKOFF_MAX_MS;
 }
@@ -414,7 +468,7 @@ esp_err_t wifi_manager_join(const char *ssid, const char *password)
     }
 
     configure_station(credentials.ssid, credentials.password);
-    esp_timer_start_once(s_reconnect_timer, (uint64_t)INITIAL_CONNECT_DELAY_MS * 1000u);
+    arm_reconnect(INITIAL_CONNECT_DELAY_MS, "network submitted");
 
     return ESP_OK;
 }

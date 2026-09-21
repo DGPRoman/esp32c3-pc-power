@@ -3,13 +3,13 @@
 #include <assert.h>
 #include <string.h>
 
+#include "esp_private/periph_ctrl.h"
 #include "esp_rom_sys.h"
 #include "hw_gpio.h"
 #include "hw_reg.h"
 #include "soc/gpio_sig_map.h"
 #include "soc/i2c_reg.h"
 #include "soc/soc.h"
-#include "soc/system_reg.h"
 
 /** @brief The C3 has exactly one I²C controller, and its register macros are indexed. */
 #define I2C0 0u
@@ -245,10 +245,22 @@ hw_i2c_result_t hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz)
      * merely released, because a software restart can catch the controller
      * mid-transaction, and a half-finished state machine that still believes it owns
      * the bus reports the bus as busy forever.
+     *
+     * Through ESP-IDF rather than as three hw_reg_* calls, which is the one place in
+     * this driver that defers to the framework, and for a reason no amount of local
+     * care could substitute for. PERIP_CLK_EN0 and PERIP_RST_EN0 hold a bit for every
+     * peripheral on the chip, so the read-modify-write on each is shared with every
+     * other driver's bring-up: two of them racing lose one of the two updates, and
+     * what is left behind is a peripheral unclocked or held in reset. A critical
+     * section of our own would not help, because the code being raced against is
+     * IDF's and it takes IDF's lock. Using the accessor is how the two end up holding
+     * the same one.
+     *
+     * The header is under esp_private/. That is the cost: a stable public API for
+     * this does not exist, and the alternative is a lock that does not lock.
      */
-    hw_reg_set_bits(SYSTEM_PERIP_CLK_EN0_REG, 1u << SYSTEM_I2C_EXT0_CLK_EN_S);
-    hw_reg_set_bits(SYSTEM_PERIP_RST_EN0_REG, 1u << SYSTEM_I2C_EXT0_RST_S);
-    hw_reg_clear_bits(SYSTEM_PERIP_RST_EN0_REG, 1u << SYSTEM_I2C_EXT0_RST_S);
+    periph_module_enable(PERIPH_I2C0_MODULE);
+    periph_module_reset(PERIPH_I2C0_MODULE);
 
     /*
      * Master mode, arbitration enabled, both lines open-drain.
@@ -263,6 +275,13 @@ hw_i2c_result_t hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz)
                  (1u << I2C_MS_MODE_S) | (1u << I2C_ARBITRATION_EN_S) |
                      (1u << I2C_SDA_FORCE_OUT_S) | (1u << I2C_SCL_FORCE_OUT_S));
 
+    /*
+     * Everything from here down is an I2C_*_REG, and every one of those belongs to the
+     * controller this component is the only owner of. Nothing else on the chip writes
+     * them, so the read-modify-write in hw_reg_set_bits is safe here in a way it is
+     * not two lines above — the distinction is the reason the framework is used there
+     * and not here, rather than an inconsistency.
+     */
     configure_timing(bus_hz);
 
     /* FIFO mode with both FIFOs emptied. */
