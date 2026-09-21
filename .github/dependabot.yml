@@ -1,0 +1,35 @@
+# What tells us a dependency has moved.
+#
+# Dependabot rather than a scheduled workflow, for a reason specific to these
+# repositories: GitHub Actions is not permitted to create pull requests in this
+# organisation, which is what removed release-please. Dependabot is a separate
+# service and is not subject to that setting, so it is the one mechanism here that
+# can actually open a branch on its own.
+#
+# One ecosystem only. This firmware has no package manager Dependabot understands:
+# its dependencies are ESP-IDF itself and the components in this repository, and
+# the framework floor is declared in main/idf_component.yml where the build can
+# enforce it.
+#
+# Two things Dependabot will not watch, recorded so that nobody assumes it does:
+#
+#   - The espressif/idf:v5.5.5 container in ci.yml. The github-actions ecosystem
+#     updates `uses:` steps, not a job's container image, and the docker ecosystem
+#     reads Dockerfiles. That tag moves by hand, alongside idf_component.yml.
+#   - Anything the host tests compile. They have no dependencies at all — the
+#     assertion harness is written here for exactly that reason.
+
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+    labels: ["chore"]
