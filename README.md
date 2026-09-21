@@ -76,8 +76,12 @@ once bring-up has confirmed them on the board in hand.
 | --- | --- |
 | `main/` | Entry point and application wiring |
 | `components/` | Self-contained drivers and services, one per directory |
-| `docs/` | Wiring, pin assignments, HTTP contract |
+| `test/host/` | Host tests for everything that does not need the chip |
 | `sdkconfig.defaults` | Tracked build configuration |
+
+There is no `docs/`. This table listed one from the first commit and it has never
+existed; the wiring and the pin assignments are in the sections above, and the HTTP
+contract is not written down yet — which is its own open issue, not a missing file.
 
 ## Implementation notes
 
@@ -113,8 +117,9 @@ the monitor with `Ctrl+]`.
 
 ## Testing
 
-The components that are pure logic — the request parser, the font table, the
-framebuffer — are tested on a workstation, with no toolchain and no board:
+The components that are pure logic — the request parser, the body readers, the
+font table, the framebuffer — are tested on a workstation, with no toolchain and
+no board:
 
 ```sh
 make -C test/host
@@ -125,6 +130,12 @@ headers they include, with warnings as errors, and runs the suite under
 AddressSanitizer and UndefinedBehaviorSanitizer. The parser tests feed it
 truncated, oversized and duplicated input on purpose, so an overread the
 assertions happen not to notice is still caught.
+
+The server itself runs here too, over a `socketpair`: lwIP's socket API is the
+BSD one, so `serve_connection` is the real function reading a real socket. That
+matters more than it sounds. Testing a parser in isolation shows what it decides,
+never whether the server asks it — removing the `Transfer-Encoding` refusal left
+every parser test passing.
 
 Everything that touches a peripheral is not covered here and is not pretended to
 be: those need the chip.

@@ -187,6 +187,140 @@ static void test_content_length(void)
     }
 }
 
+static void test_transfer_encoding_is_detected(void)
+{
+    /* Not implemented, and until now not refused either: the chunk framing was read
+     * as though it were content, so "5\r\nhello\r\n0\r\n\r\n" reached a handler as a
+     * body beginning "5" and the size prefix became part of a credential. */
+    given_head("POST /join HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+    CHECK(declares_transfer_encoding());
+
+    /* Any encoding, not only chunked. This server implements none of them. */
+    given_head("POST /join HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n");
+    CHECK(declares_transfer_encoding());
+
+    /* Header names are case-insensitive, and a header smuggled past a case-sensitive
+     * check is the whole trick. */
+    given_head("POST /join HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n");
+    CHECK(declares_transfer_encoding());
+    given_head("POST /join HTTP/1.1\r\nTRANSFER-ENCODING: chunked\r\n\r\n");
+    CHECK(declares_transfer_encoding());
+
+    /* Found wherever it sits among the headers, not only first. */
+    given_head("POST /join HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n"
+               "Content-Length: 5\r\n\r\n");
+    CHECK(declares_transfer_encoding());
+
+    given_head("POST /join HTTP/1.1\r\nContent-Length: 5\r\n\r\n");
+    CHECK(!declares_transfer_encoding());
+    given_head("GET /status HTTP/1.1\r\n\r\n");
+    CHECK(!declares_transfer_encoding());
+
+    /* The name has to be a header name, not text inside another header's value. */
+    given_head("POST /join HTTP/1.1\r\nX-Note: Transfer-Encoding: chunked\r\n\r\n");
+    CHECK(!declares_transfer_encoding());
+}
+
+/**
+ * @brief Feed @p request to serve_connection over a socket pair and return the reply.
+ *
+ * A real socket, and the real function: lwIP's API is the BSD one, so the stub
+ * points at the host's and serve_connection runs here unchanged. Everything above
+ * this line tests a parser in isolation, which cannot show whether the server ever
+ * consults it — removing the Transfer-Encoding refusal left all of them passing.
+ *
+ * @return Length of the reply, or -1 if the connection produced none.
+ */
+static ssize_t serve_once(const char *request, char *reply, size_t reply_size)
+{
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) {
+        check_fail(__FILE__, __LINE__, "socketpair failed");
+        return -1;
+    }
+
+    const size_t length = strlen(request);
+    const ssize_t sent = write(pair[1], request, length);
+    CHECK(sent >= 0 && (size_t)sent == length);
+    /* Half-close, so receive_head sees the end of the request rather than blocking
+     * on a peer that is still notionally able to send more. */
+    shutdown(pair[1], SHUT_WR);
+
+    serve_connection(pair[0]);
+
+    const ssize_t received = read(pair[1], reply, reply_size - 1u);
+    reply[received > 0 ? (size_t)received : 0u] = '\0';
+
+    close(pair[0]);
+    close(pair[1]);
+    return received;
+}
+
+/** @brief A handler that answers 200 and records the body it was given. */
+static char s_seen_body[HTTP_REQUEST_BODY_MAX + 1u];
+
+static void recording_handler(const http_request_t *request, http_response_t *response)
+{
+    snprintf(s_seen_body, sizeof(s_seen_body), "%s", request->body);
+    response->status = 200;
+    response->content_type = "text/plain";
+    response->body_length = 0;
+}
+
+static void test_serving_a_request(void)
+{
+    char reply[512];
+    s_handler = recording_handler;
+
+    s_seen_body[0] = '\0';
+    CHECK(serve_once("GET /status HTTP/1.1\r\nHost: x\r\n\r\n", reply, sizeof(reply)) > 0);
+    CHECK(strncmp(reply, "HTTP/1.1 200 OK\r\n", 17) == 0);
+
+    CHECK(serve_once("POST /join HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello", reply,
+                     sizeof(reply)) > 0);
+    CHECK(strncmp(reply, "HTTP/1.1 200 OK\r\n", 17) == 0);
+    CHECK_EQ_STR(s_seen_body, "hello");
+}
+
+static void test_a_transfer_encoded_request_is_refused(void)
+{
+    char reply[512];
+    s_handler = recording_handler;
+
+    /* The framing read as content: the handler used to be given a body starting
+     * "5", so a chunk size became the first characters of a credential. */
+    s_seen_body[0] = '\0';
+    CHECK(serve_once("POST /join HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+                     "5\r\nhello\r\n0\r\n\r\n",
+                     reply, sizeof(reply)) > 0);
+    CHECK(strncmp(reply, "HTTP/1.1 501 Not Implemented\r\n", 30) == 0);
+    CHECK_EQ_STR(s_seen_body, "");
+
+    /* Both headers present is the case where believing the wrong one smuggles a
+     * second request past anything in front of this device. */
+    s_seen_body[0] = '\0';
+    CHECK(serve_once("POST /join HTTP/1.1\r\nTransfer-Encoding: chunked\r\n"
+                     "Content-Length: 5\r\n\r\nhello",
+                     reply, sizeof(reply)) > 0);
+    CHECK(strncmp(reply, "HTTP/1.1 501 Not Implemented\r\n", 30) == 0);
+    CHECK_EQ_STR(s_seen_body, "");
+}
+
+static void test_a_malformed_request_is_refused(void)
+{
+    char reply[512];
+    s_handler = recording_handler;
+
+    s_seen_body[0] = '\0';
+    CHECK(serve_once("nonsense\r\n\r\n", reply, sizeof(reply)) > 0);
+    CHECK(strncmp(reply, "HTTP/1.1 400 ", 13) == 0);
+    CHECK_EQ_STR(s_seen_body, "");
+
+    CHECK(serve_once("POST /join HTTP/1.1\r\nContent-Length: nope\r\n\r\n", reply,
+                     sizeof(reply)) > 0);
+    CHECK(strncmp(reply, "HTTP/1.1 400 ", 13) == 0);
+}
+
 void test_http_request(void)
 {
     check_begin("http request parsing");
@@ -194,4 +328,8 @@ void test_http_request(void)
     test_request_line();
     test_header_lookup();
     test_content_length();
+    test_transfer_encoding_is_detected();
+    test_serving_a_request();
+    test_a_transfer_encoded_request_is_refused();
+    test_a_malformed_request_is_refused();
 }

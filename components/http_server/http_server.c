@@ -80,6 +80,7 @@ static const char *status_text(int status)
     case 414: return "URI Too Long";
     case 431: return "Request Header Fields Too Large";
     case 500: return "Internal Server Error";
+    case 501: return "Not Implemented";
     default:  return "Status";
     }
 }
@@ -280,6 +281,43 @@ typedef enum {
  * could disagree with a choice between them, but "pick one and hope" is the shape of a
  * whole family of request-smuggling bugs, and refusing costs one comparison.
  */
+/**
+ * @brief Whether the request declares a Transfer-Encoding.
+ *
+ * Any value, not only "chunked": this server implements none of them, and the one
+ * it will actually meet is chunked. Without this check a chunked body was read as
+ * though its framing were content — so "5\r\nhello\r\n0\r\n\r\n" reached a handler
+ * as a body beginning "5", and the size prefix became part of a credential.
+ *
+ * RFC 9112 says a recipient that does not understand the encoding answers 501, and
+ * that a message with both Transfer-Encoding and Content-Length must not be
+ * forwarded — refusing outright satisfies both without this having to arbitrate.
+ */
+static bool declares_transfer_encoding(void)
+{
+    static const char NAME[] = "Transfer-Encoding:";
+
+    const char *line = strstr(s_head, "\r\n");
+    if (line == NULL) {
+        return false;
+    }
+    line += 2;
+
+    while (line[0] != '\0' && !(line[0] == '\r' && line[1] == '\n')) {
+        if (strncasecmp(line, NAME, sizeof(NAME) - 1u) == 0) {
+            return true;
+        }
+
+        const char *next = strstr(line, "\r\n");
+        if (next == NULL) {
+            break;
+        }
+        line = next + 2;
+    }
+
+    return false;
+}
+
 static length_result_t content_length(size_t *out)
 {
     static const char NAME[] = "Content-Length:";
@@ -363,6 +401,13 @@ static void serve_connection(int sock)
 
     if (!parse_request_line()) {
         respond(sock, 400, NULL, "", 0);
+        return;
+    }
+
+    if (declares_transfer_encoding()) {
+        /* Before Content-Length is read at all: a message carrying both is precisely
+         * the one where believing the wrong header smuggles a second request. */
+        respond(sock, 501, NULL, "", 0);
         return;
     }
 
