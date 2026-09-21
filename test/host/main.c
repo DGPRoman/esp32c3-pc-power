@@ -12,12 +12,14 @@
 void test_font5x7(void);
 void test_ssd1306(void);
 void test_http_request(void);
+void test_http_fields(void);
 
 int main(void)
 {
     test_font5x7();
     test_ssd1306();
     test_http_request();
+    test_http_fields();
 
     return check_summary();
 }

@@ -24,6 +24,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "http_fields.h"
 #include "http_server.h"
 #include "hw_gpio.h"
 #include "hw_i2c.h"
@@ -417,98 +418,6 @@ static void handle_setup_page(http_response_t *response)
     response->body_length = (size_t)written;
 }
 
-/** @brief Value of one hex digit, or -1 if @p c is not one. */
-static int hex_digit(char c)
-{
-    if (c >= '0' && c <= '9') {
-        return c - '0';
-    }
-    if (c >= 'a' && c <= 'f') {
-        return c - 'a' + 10;
-    }
-    if (c >= 'A' && c <= 'F') {
-        return c - 'A' + 10;
-    }
-    return -1;
-}
-
-/**
- * @brief Decode @p value_length bytes of an application/x-www-form-urlencoded value
- *        into @p out.
- *
- * '+' stands for a literal space in this encoding — unlike a URL's own query string,
- * where it does not — and every other reserved or non-ASCII byte arrives as %XX. A
- * percent not followed by two hex digits is treated as a malformed request rather than
- * copied through: what a lenient parser lets pass is what ends up stored in NVS.
- *
- * @return True if @p value decoded into @p out without truncation.
- */
-static bool url_decode(const char *value, size_t value_length, char *out, size_t out_size)
-{
-    size_t in = 0;
-    size_t pos = 0;
-
-    while (in < value_length) {
-        if (pos + 1u >= out_size) {
-            return false;
-        }
-
-        if (value[in] == '+') {
-            out[pos++] = ' ';
-            in++;
-        } else if (value[in] == '%') {
-            if (in + 2u >= value_length) {
-                return false;
-            }
-            const int high = hex_digit(value[in + 1u]);
-            const int low = hex_digit(value[in + 2u]);
-            if (high < 0 || low < 0) {
-                return false;
-            }
-            out[pos++] = (char)((high << 4) | low);
-            in += 3u;
-        } else {
-            out[pos++] = value[in];
-            in++;
-        }
-    }
-
-    out[pos] = '\0';
-    return true;
-}
-
-/**
- * @brief Find the raw, still-encoded value of field @p name in an
- *        application/x-www-form-urlencoded @p body.
- *
- * @param value_length Receives the raw value's length.
- * @return Pointer to the value within @p body, or NULL if the field is absent.
- */
-static const char *find_field(const char *body, const char *name, size_t *value_length)
-{
-    const size_t name_length = strlen(name);
-    const char *field = body;
-
-    /* Every value this loop considers a candidate is the start of a field: the first
-     * iteration by definition, and every later one because the previous iteration only
-     * advances to just past an '&'. */
-    while (field != NULL) {
-        if (strncmp(field, name, name_length) == 0 && field[name_length] == '=') {
-            const char *value = field + name_length + 1u;
-            const char *end = strchr(value, '&');
-            *value_length = end != NULL ? (size_t)(end - value) : strlen(value);
-            return value;
-        }
-
-        field = strchr(field, '&');
-        if (field != NULL) {
-            field++;
-        }
-    }
-
-    return NULL;
-}
-
 /**
  * @brief Handle a submission of the provisioning form.
  *
@@ -519,25 +428,19 @@ static const char *find_field(const char *body, const char *name, size_t *value_
  */
 static void handle_join_network(const http_request_t *request, http_response_t *response)
 {
-    size_t raw_ssid_length = 0;
-    const char *raw_ssid = find_field(request->body, "ssid", &raw_ssid_length);
-    if (raw_ssid == NULL) {
-        response->status = 400;
-        return;
-    }
-
     char ssid[WIFI_MANAGER_SSID_MAX + 1u];
-    if (!url_decode(raw_ssid, raw_ssid_length, ssid, sizeof(ssid)) || ssid[0] == '\0') {
+    if (http_fields_form_value(request->body, "ssid", ssid, sizeof(ssid)) != HTTP_FIELD_OK ||
+        ssid[0] == '\0') {
         response->status = 400;
         return;
     }
 
+    /* A password is optional — an open network has none — so only a present-and-bad
+     * one is refused. Absent leaves the empty string put there above. */
     char password[WIFI_MANAGER_PASSWORD_MAX + 1u];
     password[0] = '\0';
-    size_t raw_password_length = 0;
-    const char *raw_password = find_field(request->body, "password", &raw_password_length);
-    if (raw_password != NULL &&
-        !url_decode(raw_password, raw_password_length, password, sizeof(password))) {
+    if (http_fields_form_value(request->body, "password", password, sizeof(password)) ==
+        HTTP_FIELD_INVALID) {
         response->status = 400;
         return;
     }
@@ -564,52 +467,6 @@ static void handle_join_network(const http_request_t *request, http_response_t *
     response->status = 200;
     response->content_type = "text/html; charset=utf-8";
     response->body_length = (size_t)written;
-}
-
-/**
- * @brief Find boolean field @p name in a JSON body shaped like {"name":true}.
- *
- * Not a JSON parser: it looks for the literal quoted key, skips whitespace and a
- * colon, and accepts exactly the tokens true or false. Anything else — the field
- * missing, a different type, extra fields this device has no use for — is for the
- * caller to refuse, not for this to guess at. A hub sending anything else is a hub
- * sending the wrong request, not a request this device should try to honour part of.
- */
-static bool find_json_bool(const char *body, const char *name, bool *out)
-{
-    char pattern[24];
-    const int pattern_length = snprintf(pattern, sizeof(pattern), "\"%s\"", name);
-    if (pattern_length <= 0 || (size_t)pattern_length >= sizeof(pattern)) {
-        return false;
-    }
-
-    const char *key = strstr(body, pattern);
-    if (key == NULL) {
-        return false;
-    }
-
-    const char *value = key + pattern_length;
-    while (*value == ' ' || *value == '\t' || *value == '\n' || *value == '\r') {
-        value++;
-    }
-    if (*value != ':') {
-        return false;
-    }
-    value++;
-    while (*value == ' ' || *value == '\t' || *value == '\n' || *value == '\r') {
-        value++;
-    }
-
-    if (strncmp(value, "true", 4) == 0) {
-        *out = true;
-        return true;
-    }
-    if (strncmp(value, "false", 5) == 0) {
-        *out = false;
-        return true;
-    }
-
-    return false;
 }
 
 /**
@@ -679,7 +536,7 @@ static void handle_power(const http_request_t *request, http_response_t *respons
 
     if (strcmp(request->method, "PUT") == 0) {
         bool on = false;
-        if (!find_json_bool(request->body, "on", &on)) {
+        if (!http_fields_json_bool(request->body, "on", &on)) {
             response->status = 400;
             return;
         }
