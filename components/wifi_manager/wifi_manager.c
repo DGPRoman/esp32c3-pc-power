@@ -9,6 +9,7 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "wifi_field.h"
 #include "wifi_store.h"
 
 /* Not "wifi": that is the tag the Wi-Fi driver itself logs under, and two
@@ -102,17 +103,35 @@ static void reconnect_timer_callback(void *arg)
  * Kept apart from actually connecting because the two callers need different timing:
  * a network read from flash at boot can be tried immediately, while one just submitted
  * through the portal cannot — see ::INITIAL_CONNECT_DELAY_MS.
+ *
+ * @return The driver's own answer to the new target, or ESP_ERR_INVALID_SIZE — with
+ *         nothing changed at all — if either value is too long for the field the
+ *         driver keeps it in. Nothing that fits wifi_store_credentials_t can fail that
+ *         way, since every driver field is at least as large as the stored one feeding
+ *         it; the check is for the day one of those two sizes moves and the other
+ *         does not.
  */
-static void configure_station(const char *ssid, const char *password)
+static esp_err_t configure_station(const char *ssid, const char *password)
 {
+    /*
+     * Filled and checked before anything else is touched. Half-applying a network —
+     * disconnected from the one that worked, pointed at one the driver was never given
+     * — is a worse place to refuse from than not having started.
+     */
+    wifi_config_t config = {0};
+    if (!wifi_field_set(config.sta.ssid, sizeof(config.sta.ssid), ssid) ||
+        !wifi_field_set(config.sta.password, sizeof(config.sta.password), password)) {
+        /* Neither value is named here. The name would be most of the way to the
+         * password on a network whose password is its name, and a log is the least
+         * private thing on this device. */
+        ESP_LOGE(TAG, "station: credentials do not fit the driver's configuration");
+        return ESP_ERR_INVALID_SIZE;
+    }
+
     snprintf(s_station_ssid, sizeof(s_station_ssid), "%s", ssid);
     s_station_connected = false;
     s_station_ip[0] = '\0';
     s_backoff_ms = RECONNECT_BACKOFF_MIN_MS;
-
-    wifi_config_t config = {0};
-    memcpy(config.sta.ssid, ssid, strlen(ssid));
-    memcpy(config.sta.password, password, strlen(password));
 
     /* Harmless if the station role was not joined to anything — this only clears a
      * previous target before the new one below replaces it. */
@@ -124,6 +143,7 @@ static void configure_station(const char *ssid, const char *password)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "station: %s", esp_err_to_name(err));
     }
+    return err;
 }
 
 /**
@@ -412,8 +432,15 @@ esp_err_t wifi_manager_start(void)
             .authmode = WIFI_AUTH_WPA2_PSK,
         },
     };
-    memcpy(config.ap.ssid, s_setup_ssid, strlen(s_setup_ssid));
-    memcpy(config.ap.password, s_setup_password, strlen(s_setup_password));
+    /* Both of these are this file's own making — a six-character prefix and four hex
+     * digits, and a ten-character password — so neither can be too long for the field
+     * it goes into. The bound is kept here rather than argued about at each of the two
+     * places it would have to be re-argued if either ever stopped being generated. */
+    if (!wifi_field_set(config.ap.ssid, sizeof(config.ap.ssid), s_setup_ssid) ||
+        !wifi_field_set(config.ap.password, sizeof(config.ap.password), s_setup_password)) {
+        ESP_LOGE(TAG, "setup: access point credentials do not fit the configuration");
+        return ESP_ERR_INVALID_SIZE;
+    }
 
     err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) {
@@ -440,11 +467,14 @@ esp_err_t wifi_manager_start(void)
         /* Nothing is answering on the setup access point yet at this point in boot —
          * the HTTP server does not exist until later in app_main — so there is no
          * in-flight response for an immediate connection attempt to race with here,
-         * unlike the portal case below. */
-        configure_station(stored.ssid, stored.password);
-        const esp_err_t connect_err = esp_wifi_connect();
-        if (connect_err != ESP_OK) {
-            ESP_LOGE(TAG, "station: %s", esp_err_to_name(connect_err));
+         * unlike the portal case below. A stored network that cannot be staged is
+         * reported by configure_station and left at that: the setup access point is
+         * up, which is where this device belongs when it has nowhere else to be. */
+        if (configure_station(stored.ssid, stored.password) == ESP_OK) {
+            const esp_err_t connect_err = esp_wifi_connect();
+            if (connect_err != ESP_OK) {
+                ESP_LOGE(TAG, "station: %s", esp_err_to_name(connect_err));
+            }
         }
     }
 
@@ -467,7 +497,16 @@ esp_err_t wifi_manager_join(const char *ssid, const char *password)
         return err;
     }
 
-    configure_station(credentials.ssid, credentials.password);
+    /* Saved first and staged second, so a network this device was told to remember is
+     * remembered even if the driver will not take it now — the same attempt is made
+     * again at every boot from here on. The refusal is still returned rather than
+     * swallowed: a submission that changed nothing this side of a reboot is not one to
+     * answer as though it had worked. */
+    const esp_err_t staged = configure_station(credentials.ssid, credentials.password);
+    if (staged != ESP_OK) {
+        return staged;
+    }
+
     arm_reconnect(INITIAL_CONNECT_DELAY_MS, "network submitted");
 
     return ESP_OK;

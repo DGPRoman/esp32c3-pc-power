@@ -14,6 +14,7 @@ void test_ssd1306(void);
 void test_http_request(void);
 void test_http_fields(void);
 void test_hw_i2c_timing(void);
+void test_wifi_field(void);
 
 int main(void)
 {
@@ -22,6 +23,7 @@ int main(void)
     test_http_request();
     test_http_fields();
     test_hw_i2c_timing();
+    test_wifi_field();
 
     return check_summary();
 }
