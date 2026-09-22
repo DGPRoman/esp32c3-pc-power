@@ -215,6 +215,40 @@ uint32_t ssd1306_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t sc
     return x;
 }
 
+uint32_t ssd1306_draw_text_fitted(uint32_t x, uint32_t y, const char *text, uint32_t scale)
+{
+    assert(scale > 0u);
+
+    if (x >= SSD1306_WIDTH) {
+        return 0u;
+    }
+
+    /* Counted from x rather than from the panel, so a caller that indents still
+     * gets a mark where its own line ends. */
+    const uint32_t columns = (SSD1306_WIDTH - x) / (FONT5X7_ADVANCE * scale);
+    const size_t length = strlen(text);
+
+    if (length <= columns) {
+        ssd1306_draw_text(x, y, text, scale);
+        return (uint32_t)length;
+    }
+    if (columns == 0u) {
+        return 0u;
+    }
+
+    /* Scale 1 is the widest this can be, so one buffer covers every scale. */
+    char line[SSD1306_TEXT_COLUMNS + 1u];
+    static_assert(SSD1306_TEXT_COLUMNS_AT(1u) == SSD1306_TEXT_COLUMNS,
+                  "the widest line is no longer the one at scale 1");
+
+    memcpy(line, text, columns - 1u);
+    line[columns - 1u] = SSD1306_TRUNCATION_MARKER;
+    line[columns] = '\0';
+
+    ssd1306_draw_text(x, y, line, scale);
+    return columns;
+}
+
 hw_i2c_result_t ssd1306_flush(void)
 {
     /* Point the write pointer at the visible window. Both ranges are inclusive, and
