@@ -9,6 +9,7 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "wifi_field.h"
 #include "wifi_store.h"
 
 /* Not "wifi": that is the tag the Wi-Fi driver itself logs under, and two
@@ -102,17 +103,35 @@ static void reconnect_timer_callback(void *arg)
  * Kept apart from actually connecting because the two callers need different timing:
  * a network read from flash at boot can be tried immediately, while one just submitted
  * through the portal cannot — see ::INITIAL_CONNECT_DELAY_MS.
+ *
+ * @return The driver's own answer to the new target, or ESP_ERR_INVALID_SIZE — with
+ *         nothing changed at all — if either value is too long for the field the
+ *         driver keeps it in. Nothing that fits wifi_store_credentials_t can fail that
+ *         way, since every driver field is at least as large as the stored one feeding
+ *         it; the check is for the day one of those two sizes moves and the other
+ *         does not.
  */
-static void configure_station(const char *ssid, const char *password)
+static esp_err_t configure_station(const char *ssid, const char *password)
 {
+    /*
+     * Filled and checked before anything else is touched. Half-applying a network —
+     * disconnected from the one that worked, pointed at one the driver was never given
+     * — is a worse place to refuse from than not having started.
+     */
+    wifi_config_t config = {0};
+    if (!wifi_field_set(config.sta.ssid, sizeof(config.sta.ssid), ssid) ||
+        !wifi_field_set(config.sta.password, sizeof(config.sta.password), password)) {
+        /* Neither value is named here. The name would be most of the way to the
+         * password on a network whose password is its name, and a log is the least
+         * private thing on this device. */
+        ESP_LOGE(TAG, "station: credentials do not fit the driver's configuration");
+        return ESP_ERR_INVALID_SIZE;
+    }
+
     snprintf(s_station_ssid, sizeof(s_station_ssid), "%s", ssid);
     s_station_connected = false;
     s_station_ip[0] = '\0';
     s_backoff_ms = RECONNECT_BACKOFF_MIN_MS;
-
-    wifi_config_t config = {0};
-    memcpy(config.sta.ssid, ssid, strlen(ssid));
-    memcpy(config.sta.password, password, strlen(password));
 
     /* Harmless if the station role was not joined to anything — this only clears a
      * previous target before the new one below replaces it. */
@@ -124,6 +143,7 @@ static void configure_station(const char *ssid, const char *password)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "station: %s", esp_err_to_name(err));
     }
+    return err;
 }
 
 /**
@@ -320,7 +340,97 @@ static esp_err_t build_setup_ssid(void)
     return ESP_OK;
 }
 
-esp_err_t wifi_manager_start(void)
+/**
+ * @brief What bringing Wi-Fi up has taken so far, so that failing can give it back.
+ *
+ * Fields are in the order they are acquired, which is the order ::take_down walks
+ * backwards. A flag where there is no handle to keep is not tidiness: the opposite of
+ * esp_wifi_init() is a call with no argument, and there is nothing else to record.
+ */
+typedef struct {
+    bool event_loop;
+    esp_netif_t *ap_netif;
+    esp_netif_t *sta_netif;
+    bool driver;
+    esp_event_handler_instance_t wifi_events;
+    esp_event_handler_instance_t ip_events;
+    bool timer;
+} brought_up_t;
+
+/** @brief Log a step of the teardown that itself failed. */
+static void undo(const char *what, esp_err_t err)
+{
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "cleanup: %s: %s", what, esp_err_to_name(err));
+    }
+}
+
+/**
+ * @brief Give back everything in @p built, in the reverse of the order it was taken.
+ *
+ * Two things are deliberately not here. esp_netif_init() has no working opposite —
+ * ESP-IDF's own header says deinitialisation "is not supported yet" — and the NVS
+ * partition wifi_store_init() opens belongs to the whole firmware, which is still
+ * running and still reading from it.
+ *
+ * Nothing here is reached on the way to a working device, so what it is worth is what
+ * happens after it: the caller is left free to try again, and a retry that ran into
+ * its own leftovers — an event loop that already exists, a netif already attached —
+ * would fail for a reason that has nothing to do with why the first attempt did.
+ */
+static void take_down(brought_up_t *built)
+{
+    if (built->timer) {
+        /* Deleted rather than stopped first: every failure that gets here happens
+         * before anything can arm this timer, and esp_timer_delete refuses a running
+         * one — so a stop would be a call whose only possible answer is a warning. */
+        undo("timer", esp_timer_delete(s_reconnect_timer));
+        s_reconnect_timer = NULL;
+    }
+
+    if (built->ip_events != NULL) {
+        undo("ip handler", esp_event_handler_instance_unregister(
+                               IP_EVENT, IP_EVENT_STA_GOT_IP, built->ip_events));
+    }
+
+    if (built->wifi_events != NULL) {
+        undo("wifi handler", esp_event_handler_instance_unregister(
+                                 WIFI_EVENT, ESP_EVENT_ANY_ID, built->wifi_events));
+    }
+
+    if (built->driver) {
+        /* Stopped before it is freed. Nothing in the sequence below can fail after
+         * esp_wifi_start() as it stands, so this is for the failure added later rather
+         * than for one that is there now: which steps can fail is not something a
+         * teardown should have to be read alongside to be correct. */
+        undo("wifi stop", esp_wifi_stop());
+        undo("wifi deinit", esp_wifi_deinit());
+    }
+
+    /* After the driver is gone, because this is what detaches these from it. Both are
+     * documented no-ops on NULL, which is what an interface never created is. */
+    esp_netif_destroy_default_wifi(built->sta_netif);
+    esp_netif_destroy_default_wifi(built->ap_netif);
+
+    if (built->event_loop) {
+        undo("event loop", esp_event_loop_delete_default());
+    }
+
+    /* Both getters promise an empty string until the setup access point is up, and
+     * after this it is not: the panel drawing a network name nobody can join would be
+     * the one part of this failure the person holding the device could see. */
+    s_setup_ssid[0] = '\0';
+    s_setup_password[0] = '\0';
+}
+
+/**
+ * @brief Bring everything up, recording each piece in @p built as it is taken.
+ *
+ * Separate from ::wifi_manager_start so that a step failing stays a plain early
+ * return and the undoing is written once, at the one place that knows the whole of
+ * what was built.
+ */
+static esp_err_t bring_up(brought_up_t *built)
 {
     esp_err_t err = wifi_store_init();
     if (err != ESP_OK) {
@@ -336,19 +446,22 @@ esp_err_t wifi_manager_start(void)
     if (err != ESP_OK) {
         return err;
     }
+    built->event_loop = true;
 
     /* Creates the interface and, with it, the DHCP server that hands the phone an
      * address on 192.168.4.0/24 with the device at 192.168.4.1. Without a DHCP server
      * the access point associates and then does nothing, which looks like a firmware
      * fault and is not one. */
-    if (esp_netif_create_default_wifi_ap() == NULL) {
+    built->ap_netif = esp_netif_create_default_wifi_ap();
+    if (built->ap_netif == NULL) {
         return ESP_FAIL;
     }
 
     /* esp_wifi_scan_start() only works in WIFI_MODE_STA or WIFI_MODE_APSTA, and the
      * station control block it scans through — and a stored network later connects
      * through — is created from this netif when Wi-Fi starts below. */
-    if (esp_netif_create_default_wifi_sta() == NULL) {
+    built->sta_netif = esp_netif_create_default_wifi_sta();
+    if (built->sta_netif == NULL) {
         return ESP_FAIL;
     }
 
@@ -357,6 +470,7 @@ esp_err_t wifi_manager_start(void)
     if (err != ESP_OK) {
         return err;
     }
+    built->driver = true;
 
     /*
      * Keep the driver's own configuration in RAM. By default esp_wifi mirrors whatever
@@ -371,13 +485,13 @@ esp_err_t wifi_manager_start(void)
     }
 
     err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                             &on_wifi_event, NULL, NULL);
+                                             &on_wifi_event, NULL, &built->wifi_events);
     if (err != ESP_OK) {
         return err;
     }
 
     err = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_ip_event,
-                                             NULL, NULL);
+                                             NULL, &built->ip_events);
     if (err != ESP_OK) {
         return err;
     }
@@ -390,6 +504,7 @@ esp_err_t wifi_manager_start(void)
     if (err != ESP_OK) {
         return err;
     }
+    built->timer = true;
 
     err = build_setup_ssid();
     if (err != ESP_OK) {
@@ -412,8 +527,15 @@ esp_err_t wifi_manager_start(void)
             .authmode = WIFI_AUTH_WPA2_PSK,
         },
     };
-    memcpy(config.ap.ssid, s_setup_ssid, strlen(s_setup_ssid));
-    memcpy(config.ap.password, s_setup_password, strlen(s_setup_password));
+    /* Both of these are this file's own making — a six-character prefix and four hex
+     * digits, and a ten-character password — so neither can be too long for the field
+     * it goes into. The bound is kept here rather than argued about at each of the two
+     * places it would have to be re-argued if either ever stopped being generated. */
+    if (!wifi_field_set(config.ap.ssid, sizeof(config.ap.ssid), s_setup_ssid) ||
+        !wifi_field_set(config.ap.password, sizeof(config.ap.password), s_setup_password)) {
+        ESP_LOGE(TAG, "setup: access point credentials do not fit the configuration");
+        return ESP_ERR_INVALID_SIZE;
+    }
 
     err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) {
@@ -440,15 +562,33 @@ esp_err_t wifi_manager_start(void)
         /* Nothing is answering on the setup access point yet at this point in boot —
          * the HTTP server does not exist until later in app_main — so there is no
          * in-flight response for an immediate connection attempt to race with here,
-         * unlike the portal case below. */
-        configure_station(stored.ssid, stored.password);
-        const esp_err_t connect_err = esp_wifi_connect();
-        if (connect_err != ESP_OK) {
-            ESP_LOGE(TAG, "station: %s", esp_err_to_name(connect_err));
+         * unlike the portal case below. A stored network that cannot be staged is
+         * reported by configure_station and left at that: the setup access point is
+         * up, which is where this device belongs when it has nowhere else to be. */
+        if (configure_station(stored.ssid, stored.password) == ESP_OK) {
+            const esp_err_t connect_err = esp_wifi_connect();
+            if (connect_err != ESP_OK) {
+                ESP_LOGE(TAG, "station: %s", esp_err_to_name(connect_err));
+            }
         }
     }
 
     return ESP_OK;
+}
+
+esp_err_t wifi_manager_start(void)
+{
+    brought_up_t built = {0};
+
+    const esp_err_t err = bring_up(&built);
+    if (err != ESP_OK) {
+        /* Not logged here: the caller has the same error and already says so. All this
+         * has to add is that the failure did not also cost the device an event loop,
+         * two interfaces and a driver that nothing will ever come back for. */
+        take_down(&built);
+    }
+
+    return err;
 }
 
 esp_err_t wifi_manager_join(const char *ssid, const char *password)
@@ -467,7 +607,16 @@ esp_err_t wifi_manager_join(const char *ssid, const char *password)
         return err;
     }
 
-    configure_station(credentials.ssid, credentials.password);
+    /* Saved first and staged second, so a network this device was told to remember is
+     * remembered even if the driver will not take it now — the same attempt is made
+     * again at every boot from here on. The refusal is still returned rather than
+     * swallowed: a submission that changed nothing this side of a reboot is not one to
+     * answer as though it had worked. */
+    const esp_err_t staged = configure_station(credentials.ssid, credentials.password);
+    if (staged != ESP_OK) {
+        return staged;
+    }
+
     arm_reconnect(INITIAL_CONNECT_DELAY_MS, "network submitted");
 
     return ESP_OK;
