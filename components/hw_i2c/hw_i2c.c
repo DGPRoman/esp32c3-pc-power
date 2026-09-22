@@ -1,11 +1,11 @@
 #include "hw_i2c.h"
 
-#include <assert.h>
 #include <string.h>
 
 #include "esp_private/periph_ctrl.h"
 #include "esp_rom_sys.h"
 #include "hw_gpio.h"
+#include "hw_i2c_timing.h"
 #include "hw_reg.h"
 #include "soc/gpio_sig_map.h"
 #include "soc/i2c_reg.h"
@@ -41,8 +41,12 @@ enum {
     OP_RESTART = 6,
 };
 
-/** @brief TIME_OUT_VALUE is a five-bit field. */
-#define TIMEOUT_VALUE_MAX 0x1Fu
+/**
+ * @brief Largest 7-bit address. Above it the shift in a frame's first byte carries
+ *        into the read/write bit, so a write goes out to a different device as a
+ *        read — a wrong answer rather than a refused one.
+ */
+#define ADDRESS_MAX 0x7Fu
 
 /**
  * @brief SCL pulses used to free a bus left mid-transfer.
@@ -77,69 +81,40 @@ enum {
 static uint32_t s_bus_hz;
 
 /**
- * @brief Derive the controller's timing counters from a target bus frequency.
+ * @brief Write the counters @p timing describes into the controller.
  *
- * The hardware has no concept of a frequency. It has counters measured in
- * source-clock ticks, and the bus speed is whatever they add up to.
+ * The arithmetic that produced them is in hw_i2c_timing.c, where it runs on a host
+ * and is tested there; what is left here is which register takes which value, and
+ * the off-by-one that goes with it.
  *
- * The arithmetic follows ESP-IDF's, including the part that contradicts the
- * reference manual. The manual says each counter holds one less than the interval it
- * describes; Espressif's HAL carries a comment reporting that doing this to the two
- * high-period counters measurably overshoots the target frequency, and writes those
- * two as-is. That is a measurement, not a guess, and it is not derivable from the
- * documentation.
+ * That off-by-one is where the reference manual and Espressif's own HAL part company.
+ * The manual says each counter holds one less than the interval it describes;
+ * Espressif's HAL carries a comment reporting that doing this to the two high-period
+ * counters measurably overshoots the target frequency, and writes those two as-is.
+ * That is a measurement, not a guess, and it is not derivable from the documentation.
  */
-static void configure_timing(uint32_t bus_hz)
+static void write_timing(const hw_i2c_timing_t *timing)
 {
-    const uint32_t source_hz = SOC_XTAL_FREQ_MHZ * 1000000u;
-
-    /* Pre-divider for the peripheral's own clock. Keeping the divided clock at least
-     * 1024× the bus frequency leaves the counters enough resolution to land on the
-     * requested speed rather than near it. */
-    const uint32_t clkm_div = source_hz / (bus_hz * 1024u) + 1u;
-    const uint32_t sclk_hz = source_hz / clkm_div;
-    const uint32_t half = sclk_hz / bus_hz / 2u;
-    assert(half >= 8u);
-
-    /* SCL's high time is split in two: part of it is spent watching whether a
-     * peripheral is holding the line down to ask for more time, and the rest is the
-     * clock pulse proper. */
-    const uint32_t wait_high = (bus_hz >= 80000u) ? (half / 2u - 2u) : (half / 4u);
-    const uint32_t high = half - wait_high;
-    const uint32_t sda_hold = half / 4u;
-    const uint32_t sda_sample = half / 2u;
-
-    /* An ordering the hardware assumes: finish looking for clock stretching before
-     * sampling SDA, and sample before the pulse ends. */
-    assert(wait_high < sda_sample && sda_sample < high);
-
     /* XTAL rather than the internal RC oscillator. These counters are in source
      * clock ticks, so a source that drifts with temperature drifts the bus with it. */
-    hw_reg_write(I2C_CLK_CONF_REG(I2C0),
-                 ((clkm_div - 1u) << I2C_SCLK_DIV_NUM_S) | (1u << I2C_SCLK_ACTIVE_S));
+    hw_reg_write(I2C_CLK_CONF_REG(I2C0), ((timing->clkm_div - 1u) << I2C_SCLK_DIV_NUM_S) |
+                                             (1u << I2C_SCLK_ACTIVE_S));
 
-    hw_reg_write(I2C_SCL_LOW_PERIOD_REG(I2C0), half - 1u);
+    hw_reg_write(I2C_SCL_LOW_PERIOD_REG(I2C0), timing->half - 1u);
     hw_reg_write(I2C_SCL_HIGH_PERIOD_REG(I2C0),
-                 (high << I2C_SCL_HIGH_PERIOD_S) |
-                     (wait_high << I2C_SCL_WAIT_HIGH_PERIOD_S));
-    hw_reg_write(I2C_SDA_HOLD_REG(I2C0), sda_hold - 1u);
-    hw_reg_write(I2C_SDA_SAMPLE_REG(I2C0), sda_sample - 1u);
-    hw_reg_write(I2C_SCL_START_HOLD_REG(I2C0), half - 1u);
-    hw_reg_write(I2C_SCL_RSTART_SETUP_REG(I2C0), half - 1u);
-    hw_reg_write(I2C_SCL_STOP_HOLD_REG(I2C0), half - 1u);
-    hw_reg_write(I2C_SCL_STOP_SETUP_REG(I2C0), half - 1u);
+                 (timing->high << I2C_SCL_HIGH_PERIOD_S) |
+                     (timing->wait_high << I2C_SCL_WAIT_HIGH_PERIOD_S));
+    hw_reg_write(I2C_SDA_HOLD_REG(I2C0), timing->sda_hold - 1u);
+    hw_reg_write(I2C_SDA_SAMPLE_REG(I2C0), timing->sda_sample - 1u);
+    hw_reg_write(I2C_SCL_START_HOLD_REG(I2C0), timing->half - 1u);
+    hw_reg_write(I2C_SCL_RSTART_SETUP_REG(I2C0), timing->half - 1u);
+    hw_reg_write(I2C_SCL_STOP_HOLD_REG(I2C0), timing->half - 1u);
+    hw_reg_write(I2C_SCL_STOP_SETUP_REG(I2C0), timing->half - 1u);
 
-    /*
-     * Hardware timeout, expressed as a power of two in source-clock ticks: how long
-     * SCL may sit in one state before the controller abandons the transaction. Sized
-     * at roughly five half-cycles, so a peripheral that dies mid-byte cannot hold
-     * the bus indefinitely, and clamped to the width of the field.
-     */
-    uint32_t tout = 32u - (uint32_t)__builtin_clz(5u * half) + 2u;
-    if (tout > TIMEOUT_VALUE_MAX) {
-        tout = TIMEOUT_VALUE_MAX;
-    }
-    hw_reg_write(I2C_TO_REG(I2C0), tout | (1u << I2C_TIME_OUT_EN_S));
+    /* Hardware timeout: how long SCL may sit in one state before the controller
+     * abandons the transaction, so a peripheral that dies mid-byte cannot hold the
+     * bus indefinitely. */
+    hw_reg_write(I2C_TO_REG(I2C0), timing->timeout | (1u << I2C_TIME_OUT_EN_S));
 }
 
 /**
@@ -237,8 +212,13 @@ static void emit_stop(void)
 
 hw_i2c_result_t hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz)
 {
-    assert(bus_hz > 0u);
-    s_bus_hz = bus_hz;
+    /* Before the peripheral is touched at all. A frequency the counters cannot be
+     * carved out of is the caller's mistake, and answering it with an untouched
+     * controller is better than answering it with a half-configured one. */
+    hw_i2c_timing_t timing;
+    if (!hw_i2c_timing_derive(SOC_XTAL_FREQ_MHZ * 1000000u, bus_hz, &timing)) {
+        return HW_I2C_BAD_ARGUMENT;
+    }
 
     /*
      * The peripheral comes out of boot clock-gated. Its reset is pulsed rather than
@@ -282,7 +262,7 @@ hw_i2c_result_t hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz)
      * not two lines above — the distinction is the reason the framework is used there
      * and not here, rather than an inconsistency.
      */
-    configure_timing(bus_hz);
+    write_timing(&timing);
 
     /* FIFO mode with both FIFOs emptied. */
     hw_reg_write(I2C_FIFO_CONF_REG(I2C0),
@@ -320,6 +300,11 @@ hw_i2c_result_t hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz)
         return HW_I2C_BUS_BUSY;
     }
     emit_stop();
+
+    /* Last, and only here. s_bus_hz is the divisor the transaction deadline is
+     * computed from and the flag the two entry points read to decide the bus exists
+     * at all, so a start that gave up partway must not leave it looking finished. */
+    s_bus_hz = bus_hz;
 
     return HW_I2C_OK;
 }
@@ -453,8 +438,16 @@ static hw_i2c_result_t run_write(const uint8_t *frame, size_t count)
 
 hw_i2c_result_t hw_i2c_write(uint8_t address, const uint8_t *data, size_t len)
 {
-    assert(address <= 0x7Fu);
-    assert(data != NULL || len == 0u);
+    /* Both of these were asserts, and both guard a consequence rather than merely
+     * naming a caller's mistake: without the first, completion_timeout_us divides by
+     * a zero s_bus_hz; without the second, the frame goes out to the wrong device or
+     * the memcpy below reads from NULL. NDEBUG left a release build with neither. */
+    if (s_bus_hz == 0u) {
+        return HW_I2C_NOT_READY;
+    }
+    if (address > ADDRESS_MAX || (data == NULL && len > 0u)) {
+        return HW_I2C_BAD_ARGUMENT;
+    }
 
     if (len > HW_I2C_MAX_PAYLOAD) {
         return HW_I2C_TOO_LONG;
@@ -473,7 +466,12 @@ hw_i2c_result_t hw_i2c_write(uint8_t address, const uint8_t *data, size_t len)
 
 hw_i2c_result_t hw_i2c_probe(uint8_t address)
 {
-    assert(address <= 0x7Fu);
+    if (s_bus_hz == 0u) {
+        return HW_I2C_NOT_READY;
+    }
+    if (address > ADDRESS_MAX) {
+        return HW_I2C_BAD_ARGUMENT;
+    }
 
     const uint8_t frame = (uint8_t)(address << 1);
     return run_write(&frame, 1u);
@@ -486,12 +484,14 @@ const char *hw_i2c_result_name(hw_i2c_result_t result)
      * -Werror=switch. The fallback below covers only a value that is not a valid
      * enumerator at all. */
     switch (result) {
-    case HW_I2C_OK:       return "ok";
-    case HW_I2C_NACK:     return "no acknowledgement";
-    case HW_I2C_TIMEOUT:  return "timed out";
-    case HW_I2C_ARB_LOST: return "arbitration lost";
-    case HW_I2C_BUS_BUSY: return "bus busy";
-    case HW_I2C_TOO_LONG: return "payload too long";
+    case HW_I2C_OK:           return "ok";
+    case HW_I2C_NACK:         return "no acknowledgement";
+    case HW_I2C_TIMEOUT:      return "timed out";
+    case HW_I2C_ARB_LOST:     return "arbitration lost";
+    case HW_I2C_BUS_BUSY:     return "bus busy";
+    case HW_I2C_TOO_LONG:     return "payload too long";
+    case HW_I2C_NOT_READY:    return "bus not initialised";
+    case HW_I2C_BAD_ARGUMENT: return "unusable argument";
     }
     return "unrecognised";
 }

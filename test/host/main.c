@@ -13,6 +13,7 @@ void test_font5x7(void);
 void test_ssd1306(void);
 void test_http_request(void);
 void test_http_fields(void);
+void test_hw_i2c_timing(void);
 
 int main(void)
 {
@@ -20,6 +21,7 @@ int main(void)
     test_ssd1306();
     test_http_request();
     test_http_fields();
+    test_hw_i2c_timing();
 
     return check_summary();
 }
