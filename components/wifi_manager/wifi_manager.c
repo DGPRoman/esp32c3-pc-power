@@ -135,9 +135,9 @@ static esp_err_t configure_station(const char *ssid, const char *password)
 
     /* Harmless if the station role was not joined to anything — this only clears a
      * previous target before the new one below replaces it. */
-    esp_wifi_disconnect();
+    (void)esp_wifi_disconnect();
     /* Drop whatever attempt — an initial one, a retry — was already waiting. */
-    esp_timer_stop(s_reconnect_timer);
+    (void)esp_timer_stop(s_reconnect_timer);
 
     const esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &config);
     if (err != ESP_OK) {
@@ -174,7 +174,7 @@ static void arm_reconnect(uint32_t delay_ms, const char *reason)
 {
     /* An unarmed timer answers ESP_ERR_INVALID_STATE here, which is the expected
      * case and not an error. */
-    esp_timer_stop(s_reconnect_timer);
+    (void)esp_timer_stop(s_reconnect_timer);
 
     const esp_err_t err =
         esp_timer_start_once(s_reconnect_timer, (uint64_t)delay_ms * 1000u);
@@ -713,6 +713,10 @@ esp_err_t wifi_manager_scan(wifi_manager_network_t *out, uint16_t *count)
     err = esp_wifi_scan_get_ap_records(&fetched, s_records);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "scan: %s", esp_err_to_name(err));
+        /* A scan's results are the driver's own allocation, and reading them is one of
+         * the three things documented to free it. This is the path where that read did
+         * not happen, so the one call that frees it without reading it does. */
+        (void)esp_wifi_clear_ap_list();
         return err;
     }
 
