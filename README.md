@@ -10,12 +10,13 @@ sensing the power LED header to know whether the machine is actually on. That
 makes a rarely-used desktop something you can leave switched off and bring up on
 demand, from a phone, without a second machine having to stay awake to do it.
 
-> **Status: the power path is not wired yet.** Everything around it is built and
-> runs on the board — setup mode, joining a network, the display, the HTTP server
-> and its authenticated endpoints — but `/v1/power` moves a boolean and logs that no
-> relay is attached. Driving the header and sensing the LED is the next piece of
-> work. The paragraph above describes what the device is for, not what it does
-> today; the checklist at the end is the accurate version.
+> **Status: the power path is written and has not met a motherboard yet.** The
+> firmware drives the button line, samples the LED, and derives on, off,
+> turning_on and turning_off from the two; `/v1/power` reports what the LED says
+> rather than what was last asked for. What has not happened is bring-up: the two
+> GPIO numbers in `main/board.h` are chosen rather than measured, and nothing here
+> has been confirmed against a front-panel header. The paragraph above describes
+> what the device is for; the checklist at the end is the accurate version.
 
 Commands arrive over HTTP. The intended caller is
 [`pihome-hub`](https://github.com/DGPRoman/pihome-hub), a self-hosted FastAPI control
@@ -83,8 +84,15 @@ line in the status list below, and they pair with pihome-hub#20.
   motherboard's `5VSB` rail. Never the switched 5 V: a controller that loses power
   with the PC cannot turn the PC back on.
 
-Exact GPIO assignments and the wiring diagram are recorded in `docs/hardware.md`
-once bring-up has confirmed them on the board in hand.
+The GPIO assignments are in [`main/board.h`](main/board.h), which is the only file
+that knows any of them. The two on the front-panel header are marked provisional:
+they are chosen to be clear of the strapping pins, the display's I²C, the native
+USB pair and the module's SPI flash, and bring-up is what turns that into a fact.
+
+The button line is active high so that the safe level is the one a reset produces
+— a pad leaves reset as a high-impedance input, which with the optocoupler's LED
+pulled down is the button not pressed. Active low would make every reset a
+keypress on the machine inside the case.
 
 > **Working inside a PC:** unplug the power cord and drain the PSU before touching
 > the front-panel header. The header itself is low-voltage logic, but the supply a
@@ -180,7 +188,8 @@ Early development. The HTTP contract is not stable yet.
 - [x] HTTP/1.1 server on BSD sockets
 - [x] Provisioning portal, joining a network
 - [x] Authenticated command endpoints
-- [ ] Power pulse output, LED sense, power-state machine
+- [x] Power pulse output, LED sense, power-state machine — written and host-tested;
+      the pin numbers are provisional until bring-up
 - [ ] Hub-side integration — the device announcing its address, and the hub polling
       `GET /status`. Neither exists, and the hub has no outbound HTTP client to
       build the second half on.

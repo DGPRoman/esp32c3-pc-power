@@ -28,6 +28,7 @@
 #include "http_server.h"
 #include "hw_gpio.h"
 #include "hw_i2c.h"
+#include "power.h"
 #include "ssd1306.h"
 #include "wifi_manager.h"
 
@@ -59,17 +60,6 @@ static const char *TAG = "boot";
  * codebase has already been careful to avoid everywhere else a response is assembled.
  */
 static char s_network_list[WIFI_MANAGER_SCAN_MAX * NETWORK_ITEM_BUDGET];
-
-/**
- * @brief This device's power state, as far as anything has told it so far.
- *
- * Not backed by anything electrical yet — see ::handle_power. Held in memory because
- * that is honestly what it is: what the hub last asked for, not a measurement. Once
- * the PWR_LED sense circuit exists, the real state is read from the machine itself on
- * every boot, and this placeholder is replaced rather than persisted forward — a
- * remembered guess is not a fallback worth keeping once the truth is available.
- */
-static bool s_power_on = false;
 
 /*
  * A brief flash on a long period rather than an even blink. It reads as a
@@ -569,64 +559,74 @@ static void respond_unauthorized(http_response_t *response)
     response->body_length = length;
 }
 
-/** @brief Write the current (simulated) power state as the response body. */
-static void write_power_state(http_response_t *response)
+/**
+ * @brief Write the power state as the response body, at @p status.
+ *
+ * Four fields, and the two clocks are the interesting ones. @c observed_at_ms says
+ * when the state was entered and @c uptime_ms says what time it is now, both on
+ * this device's own clock — so a reader works out how old the reading is by
+ * subtracting, without either side having to agree about what the time is. A
+ * restart shows up in the same pair as an uptime that went backwards.
+ */
+static void write_power_state(http_response_t *response, int status)
 {
-    const int written = snprintf(response->body, response->body_capacity, "{\"on\":%s}",
-                                 s_power_on ? "true" : "false");
+    const power_status_t power = power_read();
+    const int written = snprintf(
+        response->body, response->body_capacity,
+        "{\"state\":\"%s\",\"pending\":\"%s\",\"observed_at_ms\":%llu,\"uptime_ms\":%llu}",
+        power_state_name(power.state), power_request_name(power.pending),
+        (unsigned long long)power.observed_at_ms, (unsigned long long)power.uptime_ms);
     if (written < 0 || (size_t)written >= response->body_capacity) {
         response->status = 500;
         return;
     }
 
-    response->status = 200;
+    response->status = status;
     response->content_type = "application/json";
     response->body_length = (size_t)written;
 }
 
 /**
- * @brief GET and PUT for /v1/power.
+ * @brief GET for /v1/power.
  *
- * There is no relay to drive yet, and no optocoupler to sense the machine's own power
- * light through — s_power_on is the whole of this device's power state until that
- * hardware exists. The endpoint is real, not a placeholder that will need a different
- * shape later: a hub built against this contract now keeps working unchanged once a
- * PUT here starts a real pulse instead of only remembering that one was asked for.
+ * Read-only, and there is no PUT. A machine's power is not a setting that can be
+ * assigned: a press is a request that takes seconds, that an operating system may
+ * decline, and whose result only the power LED can report. The two things that can
+ * be asked for are below, and what actually happened is read back here.
  */
 static void handle_power(const http_request_t *request, http_response_t *response)
 {
-    if (strcmp(request->method, "GET") == 0) {
-        write_power_state(response);
+    if (strcmp(request->method, "GET") != 0) {
+        response->status = 405;
         return;
     }
 
-    if (strcmp(request->method, "PUT") == 0) {
-        bool on = false;
-        if (!http_fields_json_bool(request->body, "on", &on)) {
-            response->status = 400;
-            return;
-        }
-
-        s_power_on = on;
-        ESP_LOGI(TAG, "power: set to %s (no relay wired yet)", on ? "on" : "off");
-        write_power_state(response);
-        return;
-    }
-
-    response->status = 405;
+    write_power_state(response, 200);
 }
 
-/** @brief POST for /v1/power/toggle. */
-static void handle_power_toggle(const http_request_t *request, http_response_t *response)
+/**
+ * @brief POST for /v1/power/press and /v1/power/hold.
+ *
+ * 202 when the request was taken up — accepted, not done, because what follows is
+ * a pulse and then however long the machine takes. 409 when it was refused, which
+ * happens when the line is still down from a previous request, when a transition
+ * is already running, or before the sense line has settled. The body carries the
+ * current state either way, so a client that is refused learns why without asking
+ * a second question.
+ *
+ * Two routes rather than one with a parameter. Holding the button is a hardware
+ * cut-off with whatever was in flight lost, and it should not be reachable by
+ * getting a field wrong — or by a client retrying a press it never saw answered.
+ */
+static void handle_power_request(const http_request_t *request, http_response_t *response,
+                                 power_request_t what)
 {
     if (strcmp(request->method, "POST") != 0) {
         response->status = 405;
         return;
     }
 
-    s_power_on = !s_power_on;
-    ESP_LOGI(TAG, "power: toggled to %s (no relay wired yet)", s_power_on ? "on" : "off");
-    write_power_state(response);
+    write_power_state(response, power_request(what) ? 202 : 409);
 }
 
 /**
@@ -678,9 +678,10 @@ static void on_http_request(const http_request_t *request, http_response_t *resp
     }
 
     const bool is_power = strcmp(request->target, "/v1/power") == 0;
-    const bool is_power_toggle = strcmp(request->target, "/v1/power/toggle") == 0;
+    const bool is_press = strcmp(request->target, "/v1/power/press") == 0;
+    const bool is_hold = strcmp(request->target, "/v1/power/hold") == 0;
 
-    if (is_power || is_power_toggle) {
+    if (is_power || is_press || is_hold) {
         if (!authorized(request)) {
             respond_unauthorized(response);
             return;
@@ -688,7 +689,8 @@ static void on_http_request(const http_request_t *request, http_response_t *resp
         if (is_power) {
             handle_power(request, response);
         } else {
-            handle_power_toggle(request, response);
+            handle_power_request(request, response,
+                                 is_hold ? POWER_REQUEST_HOLD : POWER_REQUEST_PRESS);
         }
         return;
     }
@@ -742,6 +744,24 @@ void app_main(void)
                  (unsigned)SSD1306_TEXT_COLUMNS, (unsigned)SSD1306_TEXT_ROWS);
     } else {
         ESP_LOGE(TAG, "display: %s", hw_i2c_result_name(display));
+    }
+
+    /* Before Wi-Fi, and before anything can be asked of it over the network. The
+     * first thing this does to the front-panel header is release the button line,
+     * so the ordering matters in the same direction as everything else here: claim
+     * the hardware into a known resting state, then open the door. */
+    const power_wiring_t power_wiring = {
+        .button_gpio = BOARD_POWER_BUTTON_GPIO,
+        .button_pressed_level = BOARD_POWER_BUTTON_PRESSED_LEVEL,
+        .sense_gpio = BOARD_POWER_SENSE_GPIO,
+        .sense_lit_level = BOARD_POWER_SENSE_LIT_LEVEL,
+    };
+    const esp_err_t power = power_start(&power_wiring);
+    if (power != ESP_OK) {
+        /* Not fatal. Wi-Fi provisioning and the display are still worth having on a
+         * device whose one job cannot be done — and /v1/power says unknown, which is
+         * the truth rather than a failure hidden behind a plausible answer. */
+        ESP_LOGE(TAG, "power: %s", esp_err_to_name(power));
     }
 
     /* Before Wi-Fi: the setup page needs a key to show, and generating one is a local

@@ -32,13 +32,14 @@ CPPFLAGS := -I. -Istub \
 
 TESTS := main.c check.c stub/platform.c \
          test_font5x7.c test_ssd1306.c test_http_request.c test_http_fields.c \
-         test_hw_i2c_timing.c test_wifi_field.c
+         test_hw_i2c_timing.c test_wifi_field.c test_power_machine.c
 
 # Compiled and linked, rather than included by a test: their public API is enough.
 SOURCES := $(COMPONENTS)/font5x7/font5x7.c \
            $(COMPONENTS)/http_fields/http_fields.c \
            $(COMPONENTS)/hw_i2c/hw_i2c_timing.c \
-           $(COMPONENTS)/wifi_manager/wifi_field.c
+           $(COMPONENTS)/wifi_manager/wifi_field.c \
+           $(COMPONENTS)/power/power_machine.c
 
 # Included by a test rather than linked, because the code under test is static.
 # Listed so that editing one rebuilds: without this a change to a component leaves
