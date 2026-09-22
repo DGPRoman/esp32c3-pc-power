@@ -10,9 +10,18 @@ sensing the power LED header to know whether the machine is actually on. That
 makes a rarely-used desktop something you can leave switched off and bring up on
 demand, from a phone, without a second machine having to stay awake to do it.
 
-Commands arrive over HTTP from [`pihome-hub`](https://github.com/DGPRoman/pihome-hub),
-a self-hosted FastAPI control plane; the firmware here is the device half of that
-system and has no dependency on it beyond the HTTP contract.
+> **Status: the power path is not wired yet.** Everything around it is built and
+> runs on the board — setup mode, joining a network, the display, the HTTP server
+> and its authenticated endpoints — but `/v1/power` moves a boolean and logs that no
+> relay is attached. Driving the header and sensing the LED is the next piece of
+> work. The paragraph above describes what the device is for, not what it does
+> today; the checklist at the end is the accurate version.
+
+Commands arrive over HTTP. The intended caller is
+[`pihome-hub`](https://github.com/DGPRoman/pihome-hub), a self-hosted FastAPI control
+plane, and the firmware here is the device half of that system — though the hub does
+not call it yet, and nothing here depends on it beyond the HTTP contract. Anything on
+the LAN holding the shared secret can drive it in the meantime.
 
 ## Why not Wake-on-LAN
 
@@ -35,7 +44,9 @@ be added alongside.
          ▼
    pihome-hub (FastAPI)
          │  HTTP + shared-secret auth, on the LAN
-         ▼
+         │  ▲
+         │  ╎  announcement and status polling — planned, not built
+         ▼  ╎
    ESP32-C3 ─── optocoupler ──▶ PWR_BTN header   (pulse: on / shutdown)
          │
          ├───── divider ───────  PWR_LED header   (sense: is it running?)
@@ -44,10 +55,19 @@ be added alongside.
 ```
 
 The device runs its own HTTP server rather than polling the hub, so a button press
-takes one request and no waiting. Two mechanisms keep that reachable: the device
-announces its address to the hub on boot and on every IP change, and the hub polls
-`GET /status` on a timer. Between them, either side noticing the other has gone
-quiet is a detectable event rather than a silent failure.
+takes one request and no waiting. The cost of that direction is that the hub has to
+know where to send it.
+
+**Nothing tells it yet.** The device serves its API to anything on the LAN holding
+the shared secret, which today means `curl` or a script; the address it is on is
+shown on the panel once it joins. `pihome-hub` has no outbound HTTP client and no
+device registry, so the two halves of this system do not talk to each other at all.
+
+Two mechanisms are planned to close that, and **neither is built**: the device
+announcing its address to the hub on boot and on every change, and the hub polling
+`GET /status` on a timer. Between them, either side going quiet would become a
+detectable event rather than a silent failure. They are the "hub-side integration"
+line in the status list below, and they pair with pihome-hub#20.
 
 ## Hardware
 
@@ -161,7 +181,9 @@ Early development. The HTTP contract is not stable yet.
 - [x] Provisioning portal, joining a network
 - [x] Authenticated command endpoints
 - [ ] Power pulse output, LED sense, power-state machine
-- [ ] Hub-side integration
+- [ ] Hub-side integration — the device announcing its address, and the hub polling
+      `GET /status`. Neither exists, and the hub has no outbound HTTP client to
+      build the second half on.
 
 ## License
 
