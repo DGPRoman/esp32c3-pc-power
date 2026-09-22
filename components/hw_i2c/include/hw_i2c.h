@@ -41,6 +41,19 @@ typedef enum {
     HW_I2C_ARB_LOST, /**< Another master won the bus mid-transaction. */
     HW_I2C_BUS_BUSY, /**< The bus was not idle when the transaction was submitted. */
     HW_I2C_TOO_LONG, /**< Payload exceeds ::HW_I2C_MAX_PAYLOAD. */
+    /**
+     * @brief A transaction was submitted before ::hw_i2c_init succeeded.
+     *
+     * Distinct from a bus failure, because nothing was attempted: there is no
+     * controller configured to attempt it with.
+     */
+    HW_I2C_NOT_READY,
+    /**
+     * @brief An argument this driver cannot honour: an address outside seven bits,
+     *        a null payload with a length, or a frequency the counters cannot be
+     *        carved out of.
+     */
+    HW_I2C_BAD_ARGUMENT,
 } hw_i2c_result_t;
 
 /**
@@ -56,8 +69,11 @@ typedef enum {
  * @param bus_hz  Target SCL frequency. The eight timing counters the hardware
  *                actually wants are derived from it.
  *
- * @return ::HW_I2C_OK, or ::HW_I2C_BUS_BUSY if the bus could not be freed — which
- *         points at SCL being held down, a wiring fault rather than a stuck device.
+ * @return ::HW_I2C_OK; ::HW_I2C_BUS_BUSY if the bus could not be freed, which points
+ *         at SCL being held down — a wiring fault rather than a stuck device; or
+ *         ::HW_I2C_BAD_ARGUMENT for a frequency the controller's counters cannot be
+ *         carved out of, in which case nothing was configured and the peripheral is
+ *         left as it was found.
  */
 hw_i2c_result_t hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz);
 
@@ -67,6 +83,11 @@ hw_i2c_result_t hw_i2c_init(uint32_t sda_pin, uint32_t scl_pin, uint32_t bus_hz)
  * @param address 7-bit device address, without the read/write bit.
  * @param data    Bytes to send; may be NULL only when @p len is zero.
  * @param len     Byte count, at most ::HW_I2C_MAX_PAYLOAD.
+ *
+ * @return ::HW_I2C_NOT_READY before a successful ::hw_i2c_init, and
+ *         ::HW_I2C_BAD_ARGUMENT for an address or pointer the contract above rules
+ *         out. Both are checks rather than assertions, so a release build has them
+ *         too.
  */
 hw_i2c_result_t hw_i2c_write(uint8_t address, const uint8_t *data, size_t len);
 
