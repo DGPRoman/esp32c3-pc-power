@@ -3,7 +3,7 @@
  * @brief Runs every host suite and reports once.
  *
  * Suites are listed here by hand. A registration mechanism would be less typing
- * and more machinery than ten components warrant; a suite that is written and
+ * and more machinery than eleven components warrant; a suite that is written and
  * not listed shows up as a linker warning about an unused function.
  */
 
@@ -15,6 +15,7 @@ void test_http_request(void);
 void test_http_fields(void);
 void test_hw_i2c_timing(void);
 void test_wifi_field(void);
+void test_power_machine(void);
 
 int main(void)
 {
@@ -24,6 +25,7 @@ int main(void)
     test_http_fields();
     test_hw_i2c_timing();
     test_wifi_field();
+    test_power_machine();
 
     return check_summary();
 }
