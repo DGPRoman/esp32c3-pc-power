@@ -27,6 +27,15 @@ jobs:
         # the parser tests worth feeding malformed input.
         run: make -C test/host
 
+      - name: Routes match the contract
+        # docs/http-api.md is what a hub is written against, and the usual way a
+        # contract document stops being true is a route added in a hurry and
+        # written down later. Paths only — the fields and statuses are prose.
+        run: sh test/check-contract.sh
+
+      - name: Lint the contract check
+        run: shellcheck --severity=style test/check-contract.sh
+
   firmware:
     name: Firmware build
     runs-on: ubuntu-latest
