@@ -53,7 +53,7 @@ static const char *TAG = "http";
 
 /*
  * One server, so one set of buffers, and they are static rather than automatic on
- * purpose: four kilobytes of response buffer inside a four-kilobyte task stack is a
+ * purpose: eight kilobytes of response buffer inside a four-kilobyte task stack is a
  * stack overflow, and overflowing into whatever is below is a fault that presents as
  * something else entirely. Static means the cost is fixed, visible at link time, and
  * cannot depend on how deep the call stack happens to be.
@@ -530,6 +530,35 @@ static int open_listener(void)
     return listener;
 }
 
+/**
+ * @brief Say how close this task has come to the bottom of its stack, when that changes.
+ *
+ * Every large buffer on this path is static for the reason given above, so what is left
+ * on the stack is frames — and two of those belong to ESP-IDF rather than to this
+ * repository: newlib's vfprintf under the page's snprintf, and the Wi-Fi scan the setup
+ * page runs before rendering. Neither depth can be read off this source, which is why
+ * ::TASK_STACK has until now been a number nobody had checked against the page it has
+ * to render.
+ *
+ * The mark only ever falls, so this prints once for the first request and then only
+ * when something goes deeper than everything before it — a handful of lines across a
+ * boot, and silence afterwards. ESP-IDF's high water mark is in bytes, unlike the words
+ * the FreeRTOS documentation describes.
+ */
+static void report_stack_headroom(void)
+{
+    static UBaseType_t s_headroom;
+
+    const UBaseType_t headroom = uxTaskGetStackHighWaterMark(NULL);
+    if (s_headroom != 0u && headroom >= s_headroom) {
+        return;
+    }
+
+    s_headroom = headroom;
+    ESP_LOGI(TAG, "stack: %u bytes of %u never used", (unsigned)headroom,
+             (unsigned)TASK_STACK);
+}
+
 static void server_task(void *arg)
 {
     (void)arg;
@@ -562,6 +591,7 @@ static void server_task(void *arg)
 
             configure_connection(sock);
             serve_connection(sock);
+            report_stack_headroom();
 
             /* Shut down before closing, so the client sees an orderly end of stream
              * rather than a reset. A browser shown a reset reports a failed page even

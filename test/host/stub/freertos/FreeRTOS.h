@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 typedef uint32_t TickType_t;
+typedef uint32_t UBaseType_t;
 
 /** One tick per millisecond, which is the default this firmware is built with. */
 #define pdMS_TO_TICKS(ms) ((TickType_t)(ms))
