@@ -59,10 +59,25 @@ enum {
  */
 static uint8_t s_framebuffer[SSD1306_WIDTH * PAGE_COUNT];
 
-/** @brief Send @p count command bytes as one transaction. */
+/**
+ * @brief Send @p count command bytes as one transaction.
+ *
+ * The bound is a check rather than an assert, and that is the whole point of it.
+ * `frame` is 31 bytes on the stack and the memcpy below writes @p count of them
+ * after a control byte; an assert is compiled out wherever NDEBUG is set, and
+ * what is left in a release build is an unbounded copy into a fixed buffer. The
+ * every-command array in this file has five bytes of margin, which is not much to
+ * spend before somebody adds a line to it.
+ *
+ * ::HW_I2C_TOO_LONG rather than a truncated write: half a command sequence leaves
+ * the controller configured in a way nothing here intended, and the caller
+ * already has to handle that code from hw_i2c_write.
+ */
 static hw_i2c_result_t send_commands(const uint8_t *commands, size_t count)
 {
-    assert(count <= CHUNK_MAX);
+    if (count > CHUNK_MAX) {
+        return HW_I2C_TOO_LONG;
+    }
 
     uint8_t frame[HW_I2C_MAX_PAYLOAD];
     frame[0] = CONTROL_COMMAND;
@@ -121,6 +136,11 @@ hw_i2c_result_t ssd1306_init(void)
         CMD_DEACTIVATE_SCROLL,
     };
 
+    /* The check in send_commands is for a caller that does not exist yet. This one
+     * does, and its array is right here — so it fails the build rather than a
+     * transaction, at the moment the line is added rather than on a panel. */
+    static_assert(sizeof(setup) <= CHUNK_MAX, "the init sequence no longer fits one frame");
+
     hw_i2c_result_t result = send_commands(setup, sizeof(setup));
     if (result != HW_I2C_OK) {
         return result;
@@ -161,6 +181,11 @@ void ssd1306_set_pixel(uint32_t x, uint32_t y, bool on)
 
 uint32_t ssd1306_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t scale)
 {
+    /* An assert and not a check, unlike the frame bound above, because there is
+     * nothing here to protect: a scale of zero runs both inner loops zero times
+     * and advances x by zero, so it draws nothing and returns where it started.
+     * Compiled out, the behaviour is a harmless no-op rather than an overrun. The
+     * assert is here to catch the caller's mistake, not the consequence of it. */
     assert(scale > 0u);
 
     for (const char *c = text; *c != '\0'; c++) {
@@ -198,6 +223,8 @@ hw_i2c_result_t ssd1306_flush(void)
         CMD_SET_COLUMN_ADDRESS, COLUMN_OFFSET, COLUMN_OFFSET + SSD1306_WIDTH - 1u,
         CMD_SET_PAGE_ADDRESS,   0x00,          PAGE_COUNT - 1u,
     };
+
+    static_assert(sizeof(window) <= CHUNK_MAX, "the window sequence no longer fits one frame");
 
     hw_i2c_result_t result = send_commands(window, sizeof(window));
     if (result != HW_I2C_OK) {

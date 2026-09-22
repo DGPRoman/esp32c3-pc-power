@@ -31,9 +31,34 @@ static unsigned lit_pixels(void)
     return count;
 }
 
+/** @brief Commands that would not fit one transaction, for the bound below. */
+static uint8_t s_oversized[CHUNK_MAX + 8u];
+
+static void test_the_command_frame_is_bounded(void)
+{
+    /* The bound used to be an assert, which is compiled out wherever NDEBUG is
+     * set — and what is left in a release build is a memcpy of caller-chosen
+     * length into a 31-byte stack array. ASan is what would notice; a panel in a
+     * case would not.
+     *
+     * Asserted through a public path would be better and is not available: every
+     * caller in this file passes a fixed array, which is exactly why the two
+     * static_asserts are there. This reaches the static function directly.
+     */
+    CHECK_EQ(send_commands(s_oversized, CHUNK_MAX), HW_I2C_OK);
+    CHECK_EQ(send_commands(s_oversized, CHUNK_MAX + 1u), HW_I2C_TOO_LONG);
+    CHECK_EQ(send_commands(s_oversized, sizeof(s_oversized)), HW_I2C_TOO_LONG);
+
+    /* Nothing is a special case at zero: an empty sequence is a control byte and
+     * no commands, which the controller accepts and which costs a transaction. */
+    CHECK_EQ(send_commands(s_oversized, 0u), HW_I2C_OK);
+}
+
 void test_ssd1306(void)
 {
     check_begin("ssd1306");
+
+    test_the_command_frame_is_bounded();
 
     /* -- Geometry ---------------------------------------------------------- */
 
