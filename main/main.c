@@ -302,10 +302,61 @@ static void draw_setup_screen(void)
 {
     ssd1306_clear();
     ssd1306_draw_text(0, 0u * SSD1306_TEXT_LINE_HEIGHT, "WIFI SETUP", 1u);
-    ssd1306_draw_text(0, 1u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_setup_ssid(), 1u);
-    ssd1306_draw_text(0, 2u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_setup_password(),
-                      1u);
+    /* Both are generated on the device and both fit — PCPWR-XXXX is eleven
+     * characters and the password is eight — so these are marked rather than
+     * clipped only so that changing either one cannot quietly cut it. */
+    ssd1306_draw_text_fitted(0, 1u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_setup_ssid(),
+                             1u);
+    ssd1306_draw_text_fitted(0, 2u * SSD1306_TEXT_LINE_HEIGHT,
+                             wifi_manager_setup_password(), 1u);
     ssd1306_draw_text(0, 3u * SSD1306_TEXT_LINE_HEIGHT, SETUP_ADDRESS, 1u);
+}
+
+/**
+ * @brief Draw a dotted address across as many of the panel's lines as it needs.
+ *
+ * Twelve characters fit on a line and a dotted quad runs to fifteen, so the
+ * address this screen exists to show was being cut — and not only in exotic cases:
+ * 192.168.1.200 is thirteen characters and is what an ordinary DHCP pool hands
+ * out. What the panel showed was 192.168.1.20, which is not a typo an operator can
+ * see, because it is a perfectly plausible address.
+ *
+ * Split after the second dot. Both halves of any dotted quad fit — eight and seven
+ * characters at worst — so the whole of it is always on the panel. Marking a cut
+ * the way ssd1306_draw_text_fitted does would be no use here: half an address is
+ * not worth showing.
+ *
+ * @return The next free line.
+ */
+static uint32_t draw_address(uint32_t line, const char *address)
+{
+    const uint32_t y = line * SSD1306_TEXT_LINE_HEIGHT;
+
+    if (strlen(address) <= SSD1306_TEXT_COLUMNS) {
+        ssd1306_draw_text(0, y, address, 1u);
+        return line + 1u;
+    }
+
+    const char *first_dot = strchr(address, '.');
+    const char *second_dot = first_dot != NULL ? strchr(first_dot + 1u, '.') : NULL;
+    if (second_dot == NULL) {
+        /* Not a dotted quad at all. Nothing sensible to split on, so mark it and
+         * let whoever is standing there see that it is partial. */
+        ssd1306_draw_text_fitted(0, y, address, 1u);
+        return line + 1u;
+    }
+
+    /* The dot goes with the first half, so the break reads as a break in an
+     * address rather than as two numbers. */
+    const size_t head = (size_t)(second_dot - address) + 1u;
+    char first[SSD1306_TEXT_COLUMNS + 1u];
+    const size_t kept = head < sizeof(first) ? head : sizeof(first) - 1u;
+    memcpy(first, address, kept);
+    first[kept] = '\0';
+
+    ssd1306_draw_text(0, y, first, 1u);
+    ssd1306_draw_text_fitted(0, y + SSD1306_TEXT_LINE_HEIGHT, &address[kept], 1u);
+    return line + 2u;
 }
 
 /** @brief Show the network this device joined, and the address it can be reached at. */
@@ -313,8 +364,12 @@ static void draw_connected_screen(void)
 {
     ssd1306_clear();
     ssd1306_draw_text(0, 0u * SSD1306_TEXT_LINE_HEIGHT, "CONNECTED", 1u);
-    ssd1306_draw_text(0, 1u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_station_ssid(), 1u);
-    ssd1306_draw_text(0, 2u * SSD1306_TEXT_LINE_HEIGHT, wifi_manager_station_ip(), 1u);
+    /* Marked rather than clipped: a network name cut in silence is a shorter name,
+     * and a shorter name is a plausible name — there is nothing on the panel to
+     * say it is not the one you are looking for. */
+    ssd1306_draw_text_fitted(0, 1u * SSD1306_TEXT_LINE_HEIGHT,
+                             wifi_manager_station_ssid(), 1u);
+    draw_address(2u, wifi_manager_station_ip());
 }
 
 /**

@@ -31,9 +31,130 @@ static unsigned lit_pixels(void)
     return count;
 }
 
+/** @brief Commands that would not fit one transaction, for the bound below. */
+static uint8_t s_oversized[CHUNK_MAX + 8u];
+
+static void test_the_command_frame_is_bounded(void)
+{
+    /* The bound used to be an assert, which is compiled out wherever NDEBUG is
+     * set — and what is left in a release build is a memcpy of caller-chosen
+     * length into a 31-byte stack array. ASan is what would notice; a panel in a
+     * case would not.
+     *
+     * Asserted through a public path would be better and is not available: every
+     * caller in this file passes a fixed array, which is exactly why the two
+     * static_asserts are there. This reaches the static function directly.
+     */
+    CHECK_EQ(send_commands(s_oversized, CHUNK_MAX), HW_I2C_OK);
+    CHECK_EQ(send_commands(s_oversized, CHUNK_MAX + 1u), HW_I2C_TOO_LONG);
+    CHECK_EQ(send_commands(s_oversized, sizeof(s_oversized)), HW_I2C_TOO_LONG);
+
+    /* Nothing is a special case at zero: an empty sequence is a control byte and
+     * no commands, which the controller accepts and which costs a transaction. */
+    CHECK_EQ(send_commands(s_oversized, 0u), HW_I2C_OK);
+}
+
+/** @brief The rightmost lit column, or -1 on an empty framebuffer. */
+static int rightmost_lit_column(void)
+{
+    for (int x = SSD1306_WIDTH - 1; x >= 0; x--) {
+        for (uint32_t y = 0; y < SSD1306_HEIGHT; y++) {
+            if (pixel((uint32_t)x, y) != 0u) {
+                return x;
+            }
+        }
+    }
+    return -1;
+}
+
+/** @brief Pixels lit by drawing @p text at the origin with plain draw_text. */
+static unsigned pixels_of(const char *text)
+{
+    ssd1306_clear();
+    ssd1306_draw_text(0, 0, text, 1u);
+    return lit_pixels();
+}
+
+static void test_text_that_does_not_fit_is_marked(void)
+{
+    /* Twelve characters fit. ssd1306_draw_text clips the thirteenth away a pixel
+     * at a time and leaves no sign of it — the panel shows a shorter string, and a
+     * shorter string is a plausible one. */
+    ssd1306_clear();
+    const uint32_t drawn = ssd1306_draw_text_fitted(0, 0, "123456789012345", 1u);
+
+    CHECK_EQ(drawn, SSD1306_TEXT_COLUMNS);
+    /* The last character drawn is the marker, not the twelfth character of the
+     * string: compared against both, so neither can pass by accident. */
+    CHECK_EQ(lit_pixels(), pixels_of("12345678901>"));
+    CHECK(lit_pixels() != pixels_of("123456789012"));
+
+    /* Exactly one over, which is the case that actually happens: 192.168.1.200 is
+     * thirteen characters and is what an ordinary DHCP pool hands out. A bound
+     * that is one too generous passes every longer string and fails only here. */
+    ssd1306_clear();
+    CHECK_EQ(ssd1306_draw_text_fitted(0, 0, "1234567890123", 1u), SSD1306_TEXT_COLUMNS);
+    CHECK_EQ(lit_pixels(), pixels_of("12345678901>"));
+}
+
+static void test_text_that_fits_is_left_alone(void)
+{
+    ssd1306_clear();
+    CHECK_EQ(ssd1306_draw_text_fitted(0, 0, "123456789012", 1u), SSD1306_TEXT_COLUMNS);
+    CHECK_EQ(lit_pixels(), pixels_of("123456789012"));
+
+    /* Exactly one short, which is where an off-by-one would show. */
+    ssd1306_clear();
+    CHECK_EQ(ssd1306_draw_text_fitted(0, 0, "12345678901", 1u), 11u);
+    CHECK_EQ(lit_pixels(), pixels_of("12345678901"));
+
+    ssd1306_clear();
+    CHECK_EQ(ssd1306_draw_text_fitted(0, 0, "", 1u), 0u);
+    CHECK_EQ(lit_pixels(), 0u);
+}
+
+static void test_the_room_is_counted_from_where_it_starts(void)
+{
+    /* An indented line has less of the panel left, so the mark belongs where that
+     * line ends and not where the panel does. */
+    ssd1306_clear();
+    const uint32_t indented = ssd1306_draw_text_fitted(FONT5X7_ADVANCE * 6u, 0,
+                                                       "123456789012", 1u);
+
+    CHECK_EQ(indented, SSD1306_TEXT_COLUMNS - 6u);
+    CHECK(rightmost_lit_column() < (int)SSD1306_WIDTH);
+
+    /* Past the right edge there is no room at all, and nothing is drawn. */
+    ssd1306_clear();
+    CHECK_EQ(ssd1306_draw_text_fitted(SSD1306_WIDTH, 0, "x", 1u), 0u);
+    CHECK_EQ(lit_pixels(), 0u);
+
+    /* Further past it, where the arithmetic is the hazard rather than the drawing:
+     * SSD1306_WIDTH - x is unsigned, so without the guard this wraps to about four
+     * billion columns and the function reports a line it did not draw. */
+    ssd1306_clear();
+    CHECK_EQ(ssd1306_draw_text_fitted(SSD1306_WIDTH + FONT5X7_ADVANCE, 0, "x", 1u), 0u);
+    CHECK_EQ(lit_pixels(), 0u);
+}
+
+static void test_a_larger_scale_fits_fewer(void)
+{
+    ssd1306_clear();
+    const uint32_t drawn = ssd1306_draw_text_fitted(0, 0, "123456789012", 2u);
+
+    CHECK_EQ(drawn, SSD1306_TEXT_COLUMNS_AT(2u));
+    CHECK(drawn < SSD1306_TEXT_COLUMNS);
+}
+
 void test_ssd1306(void)
 {
     check_begin("ssd1306");
+
+    test_the_command_frame_is_bounded();
+    test_text_that_does_not_fit_is_marked();
+    test_text_that_fits_is_left_alone();
+    test_the_room_is_counted_from_where_it_starts();
+    test_a_larger_scale_fits_fewer();
 
     /* -- Geometry ---------------------------------------------------------- */
 

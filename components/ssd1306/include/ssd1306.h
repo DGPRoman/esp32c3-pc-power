@@ -77,9 +77,14 @@ void ssd1306_set_pixel(uint32_t x, uint32_t y, bool on);
  * @brief Characters that fit across the panel at scale 1.
  *
  * Derived from the font rather than written down, so changing the font cannot leave a
- * stale layout constant behind. Twelve is a coincidence worth keeping: an IPv4
- * address in dotted-quad form runs to fifteen characters at worst, and the ones a
- * home network actually hands out — 192.168.1.42 — are exactly twelve.
+ * stale layout constant behind.
+ *
+ * Twelve, and it is not enough for an address. This comment used to call that a
+ * coincidence worth keeping, on the grounds that 192.168.1.42 is exactly twelve —
+ * but 192.168.1.200 is thirteen and just as ordinary, and a dotted quad runs to
+ * fifteen at worst. A caller with an address to show has to split it across two
+ * lines; one with anything else should use ::ssd1306_draw_text_fitted, so that a
+ * cut is visible rather than silent.
  */
 #define SSD1306_TEXT_COLUMNS SSD1306_TEXT_COLUMNS_AT(1u)
 
@@ -106,6 +111,25 @@ void ssd1306_set_pixel(uint32_t x, uint32_t y, bool on);
  *         a line can be drawn without the caller recomputing widths.
  */
 uint32_t ssd1306_draw_text(uint32_t x, uint32_t y, const char *text, uint32_t scale);
+
+/** @brief What replaces the last character of a line that would not fit. */
+#define SSD1306_TRUNCATION_MARKER '>'
+
+/**
+ * @brief Draw @p text on one line, showing when it did not fit.
+ *
+ * ::ssd1306_draw_text clips a long line away a pixel at a time, which leaves no
+ * sign that anything was cut — the panel shows a shorter name, and a shorter name
+ * is a plausible name. This replaces the last character that fits with
+ * ::SSD1306_TRUNCATION_MARKER instead, so what is on the panel says it is partial.
+ *
+ * An address is the case this does *not* solve, and deliberately: a partial
+ * address is not worth showing at all, so a caller with one splits it across two
+ * lines rather than marking it.
+ *
+ * @return Characters drawn, marker included. Zero if nothing fits at @p x.
+ */
+uint32_t ssd1306_draw_text_fitted(uint32_t x, uint32_t y, const char *text, uint32_t scale);
 
 /**
  * @brief Send the framebuffer to the panel.
