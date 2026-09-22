@@ -551,11 +551,22 @@ static bool authorized(const http_request_t *request)
 static void respond_unauthorized(http_response_t *response)
 {
     static const char BODY[] = "{\"detail\":\"Invalid or missing API key\"}";
+    const size_t length = sizeof(BODY) - 1u;
 
-    memcpy(response->body, BODY, sizeof(BODY) - 1u);
     response->status = 401;
+
+    if (length > response->body_capacity) {
+        /* Thirty-nine bytes into eight kilobytes, so this cannot happen as things
+         * stand. It is checked because every other builder on this path checks, and
+         * this was the one that would have answered a smaller buffer by writing past
+         * the end of it rather than by sending a 401 with nothing after it. */
+        response->body_length = 0;
+        return;
+    }
+
+    memcpy(response->body, BODY, length);
     response->content_type = "application/json";
-    response->body_length = sizeof(BODY) - 1u;
+    response->body_length = length;
 }
 
 /** @brief Write the current (simulated) power state as the response body. */

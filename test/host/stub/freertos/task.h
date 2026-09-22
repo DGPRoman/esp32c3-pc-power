@@ -19,3 +19,5 @@ void vTaskDelay(TickType_t ticks);
 
 int xTaskCreate(TaskFunction_t entry, const char *name, uint32_t stack_depth, void *argument,
                 uint32_t priority, TaskHandle_t *created);
+
+UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task);

@@ -1,11 +1,11 @@
 /**
  * @file test_http_request.c
- * @brief Request parsing, including the input a well-behaved client never sends.
+ * @brief The string handling on both sides of the socket: requests in, heads out.
  *
- * The translation unit is included rather than linked: the request-line parser and
- * the Content-Length scan are static, and they read a static buffer. Reaching them
- * through the socket layer would need a server, a port and a scheduler to test
- * string handling.
+ * The translation unit is included rather than linked: the request-line parser, the
+ * Content-Length scan and the head builder are all static, and the first two read a
+ * static buffer. Reaching them through the socket layer would need a server, a port
+ * and a scheduler to test string handling.
  *
  * No socket is opened here and no task is started.
  */
@@ -321,9 +321,48 @@ static void test_a_malformed_request_is_refused(void)
     CHECK(strncmp(reply, "HTTP/1.1 400 ", 13) == 0);
 }
 
+static void test_response_heads(void)
+{
+    char head[224];
+
+    const size_t length =
+        build_head(head, sizeof(head), 200, "text/html; charset=utf-8", 7u);
+    CHECK(length > 0u);
+    CHECK_EQ(strlen(head), length);
+    CHECK(strncmp(head, "HTTP/1.1 200 OK\r\n", 17u) == 0);
+    CHECK(strstr(head, "\r\nContent-Type: text/html; charset=utf-8\r\n") != NULL);
+    CHECK(strstr(head, "\r\nContent-Length: 7\r\n") != NULL);
+    CHECK(strstr(head, "\r\nCache-Control: no-store\r\n") != NULL);
+    CHECK(strstr(head, "\r\nConnection: close\r\n") != NULL);
+    if (length >= 4u) {
+        /* The blank line a client needs in order to know the head has ended. */
+        CHECK_EQ_STR(head + length - 4u, "\r\n\r\n");
+    }
+
+    /* No content type from the handler is a default, not an absent header: a body sent
+     * without one is a body the browser gets to guess at. */
+    CHECK(build_head(head, sizeof(head), 500, NULL, 0u) > 0u);
+    CHECK(strstr(head, "\r\nContent-Type: text/plain; charset=utf-8\r\n") != NULL);
+
+    /*
+     * The case that used to be answered with nothing at all: a handler naming a content
+     * type longer than the head it has to fit inside. Refused here, which is what lets
+     * respond() send its own 500 rather than close the connection in silence.
+     */
+    char huge[512];
+    memset(huge, 'x', sizeof(huge) - 1u);
+    huge[sizeof(huge) - 1u] = '\0';
+    CHECK_EQ(build_head(head, sizeof(head), 200, huge, 1u), 0u);
+
+    /* One byte short of the head it would have written, which is the same refusal
+     * arrived at from the other side. */
+    CHECK_EQ(build_head(head, length, 200, "text/html; charset=utf-8", 7u), 0u);
+    CHECK_EQ(build_head(head, 1u, 200, NULL, 0u), 0u);
+}
+
 void test_http_request(void)
 {
-    check_begin("http request parsing");
+    check_begin("http request and response");
 
     test_request_line();
     test_header_lookup();
@@ -332,4 +371,5 @@ void test_http_request(void)
     test_serving_a_request();
     test_a_transfer_encoded_request_is_refused();
     test_a_malformed_request_is_refused();
+    test_response_heads();
 }

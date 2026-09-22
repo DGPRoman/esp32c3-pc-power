@@ -3,7 +3,7 @@
  * @brief Runs every host suite and reports once.
  *
  * Suites are listed here by hand. A registration mechanism would be less typing
- * and more machinery than nine components warrant; a suite that is written and
+ * and more machinery than ten components warrant; a suite that is written and
  * not listed shows up as a linker warning about an unused function.
  */
 

@@ -23,8 +23,16 @@ static const char *TAG = "device_auth";
  * neither does any reason to pick a second alphabet just to have one. Thirty-two
  * characters from thirty-two symbols is 160 bits, which is not the constraint on how
  * hard this key is to guess; the constraint is that it is never logged.
+ *
+ * The size is deduced rather than written down. Writing 32 fits the symbols exactly
+ * and drops the terminator — gcc 15 reports that, and it would be a read past the end
+ * the first time this table were handed to a string function.
  */
-static const char ALPHABET[32] = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+static const char ALPHABET[] = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+
+/* The index into it is five bits wide, so a shorter alphabet would be read past and a
+ * longer one would have symbols nothing can reach. */
+_Static_assert(sizeof(ALPHABET) == 33u, "thirty-two symbols and a terminator");
 
 static char s_api_key[DEVICE_AUTH_API_KEY_LEN + 1u];
 

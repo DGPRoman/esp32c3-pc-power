@@ -31,6 +31,13 @@ int xTaskCreate(TaskFunction_t entry, const char *name, uint32_t stack_depth, vo
     return pdPASS;
 }
 
+/* No task, so no stack of its own to have been anywhere near the bottom of. */
+UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t task)
+{
+    (void)task;
+    return 0;
+}
+
 /*
  * A bus with nothing on it. The display tests assert on the framebuffer rather
  * than on what reaches the wire, so these only need to exist and to answer
