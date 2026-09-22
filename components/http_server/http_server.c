@@ -108,21 +108,23 @@ static bool send_all(int sock, const char *data, size_t length)
     return true;
 }
 
-/** @brief Send a complete response. */
-static void respond(int sock, int status, const char *content_type, const char *body,
-                    size_t body_length)
+/**
+ * @brief Write the head of a response into @p head.
+ *
+ * Content-Length is always sent, so the client knows where the body ends without
+ * having to wait for the connection to close. Cache-Control matters more than it
+ * looks: a browser that caches this page will happily show a stale network list, or
+ * a stale device state, and the user has no way to tell that is what they are
+ * looking at.
+ *
+ * @return Its length, or zero if it did not fit — which nothing a client sends can
+ *         cause, only a handler naming a content type longer than the head itself.
+ */
+static size_t build_head(char *head, size_t size, int status, const char *content_type,
+                         size_t body_length)
 {
-    char head[224];
-
-    /*
-     * Content-Length is always sent, so the client knows where the body ends without
-     * having to wait for the connection to close. Cache-Control matters more than it
-     * looks: a browser that caches this page will happily show a stale network list, or
-     * a stale device state, and the user has no way to tell that is what they are
-     * looking at.
-     */
-    const int head_length =
-        snprintf(head, sizeof(head),
+    const int length =
+        snprintf(head, size,
                  "HTTP/1.1 %d %s\r\n"
                  "Content-Type: %s\r\n"
                  "Content-Length: %u\r\n"
@@ -133,12 +135,38 @@ static void respond(int sock, int status, const char *content_type, const char *
                  content_type != NULL ? content_type : "text/plain; charset=utf-8",
                  (unsigned)body_length);
 
-    if (head_length <= 0 || (size_t)head_length >= sizeof(head)) {
+    if (length <= 0 || (size_t)length >= size) {
+        return 0;
+    }
+    return (size_t)length;
+}
+
+/** @brief Send a complete response. */
+static void respond(int sock, int status, const char *content_type, const char *body,
+                    size_t body_length)
+{
+    char head[224];
+    const size_t head_length =
+        build_head(head, sizeof(head), status, content_type, body_length);
+
+    if (head_length == 0u) {
+        /*
+         * Sending nothing at all — which is what this did — ends the connection cleanly
+         * with zero bytes written, so the browser reports a page that failed and the
+         * fault looks like the network's. The status is the part worth getting out, and
+         * saying only that needs no room to say it in.
+         */
+        static const char FALLBACK[] = "HTTP/1.1 500 Internal Server Error\r\n"
+                                       "Content-Length: 0\r\n"
+                                       "Connection: close\r\n"
+                                       "\r\n";
+
         ESP_LOGE(TAG, "response head did not fit");
+        (void)send_all(sock, FALLBACK, sizeof(FALLBACK) - 1u);
         return;
     }
 
-    if (!send_all(sock, head, (size_t)head_length)) {
+    if (!send_all(sock, head, head_length)) {
         return;
     }
     if (body_length > 0) {

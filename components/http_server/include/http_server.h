@@ -10,6 +10,12 @@
  * The narrow scope is the point. A general-purpose server has to survive arbitrary
  * clients; this one has to survive a phone browser and a Python client, and the code
  * that would handle everything else is code that could go wrong instead.
+ *
+ * Lines end in CRLF, as the grammar requires and as both of those clients send. A
+ * request whose lines end in a bare LF is never recognised as finished, so it is not
+ * answered at all — it waits out the receive timeout and the connection closes with
+ * nothing sent. It is the one malformed request that gets no status back, and it is
+ * exactly the request that comes of typing one into netcat by hand.
  */
 
 #pragma once
