@@ -24,6 +24,10 @@ plane, and the firmware here is the device half of that system — though the hu
 not call it yet, and nothing here depends on it beyond the HTTP contract. Anything on
 the LAN holding the shared secret can drive it in the meantime.
 
+The contract is written down in [`docs/http-api.md`](docs/http-api.md) — every route,
+field and status code, and the rule for what may change under `/v1` without breaking
+a caller.
+
 ## Why not Wake-on-LAN
 
 WoL solves a third of the problem. It can turn a machine on, but it cannot turn
@@ -102,14 +106,12 @@ keypress on the machine inside the case.
 
 | Path | Contents |
 | --- | --- |
-| `main/` | Entry point and application wiring |
+| `main/` | Entry point, application wiring, and the board's pin map |
 | `components/` | Self-contained drivers and services, one per directory |
+| `docs/` | [The HTTP contract](docs/http-api.md) |
 | `test/host/` | Host tests for everything that does not need the chip |
+| `test/check-contract.sh` | Fails if a route is served without being documented, or the reverse |
 | `sdkconfig.defaults` | Tracked build configuration |
-
-There is no `docs/`. This table listed one from the first commit and it has never
-existed; the wiring and the pin assignments are in the sections above, and the HTTP
-contract is not written down yet — which is its own open issue, not a missing file.
 
 ## Implementation notes
 
@@ -177,7 +179,10 @@ artefact flashable to more than one unit.
 
 ## Status
 
-Early development. The HTTP contract is not stable yet.
+Early development. [`/v1` is frozen](docs/http-api.md#compatibility) as of the
+commit that wrote it down: fields are added and never removed, enumerations grow,
+and a breaking change would be a `/v2` served alongside it. The provisioning
+pages are outside that promise and may change in any release.
 
 - [x] Project scaffolding, build, flash, console
 - [x] Register-level GPIO — status LED
