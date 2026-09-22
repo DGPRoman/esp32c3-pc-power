@@ -2,9 +2,10 @@
  * @file hw_gpio.h
  * @brief GPIO output driver for the ESP32-C3, written against its register map.
  *
- * Scope is deliberately narrow — the pins this firmware drives and nothing else.
- * Plain inputs and interrupts arrive with the code that needs them rather than
- * being written speculatively.
+ * Scope is deliberately narrow — the pins this firmware drives and reads, and
+ * nothing else. Interrupts still arrive with the code that needs them rather than
+ * being written speculatively; the power-LED sense line is sampled on a timer, so
+ * it wanted a level rather than an edge.
  */
 
 #pragma once
@@ -47,6 +48,28 @@ void hw_gpio_output_init(uint32_t pin, bool level);
  * a pin back to invert it cannot be atomic, so the caller owns the current state.
  */
 void hw_gpio_write(uint32_t pin, bool level);
+
+/**
+ * @brief Claim @p pin as a plain input, optionally with the pad's pull-up.
+ *
+ * The output driver is disabled first, so a pin previously driven is released
+ * before anything downstream is asked what level it is at.
+ *
+ * @param pin     GPIO number, 0 to ::HW_GPIO_MAX.
+ * @param pull_up Enable the pad's internal pull-up, roughly 45 kΩ. Enough to give
+ *                a floating pin a defined level; not enough to be a bias network.
+ *                A line driven by something on the other end wants this off.
+ */
+void hw_gpio_input_init(uint32_t pin, bool pull_up);
+
+/**
+ * @brief Read @p pin, previously claimed by ::hw_gpio_input_init.
+ *
+ * One sample of a level, with no filtering of any kind. Anything connected to the
+ * world outside the board needs that filtering, and it belongs to whoever knows
+ * what the signal is supposed to look like.
+ */
+bool hw_gpio_read(uint32_t pin);
 
 /**
  * @brief Claim @p pin as an open-drain bus line owned by a peripheral.

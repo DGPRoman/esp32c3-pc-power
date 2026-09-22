@@ -125,6 +125,40 @@ void hw_gpio_output_init(uint32_t pin, bool level)
     hw_reg_write(GPIO_ENABLE_W1TS_REG, 1u << pin);
 }
 
+void hw_gpio_input_init(uint32_t pin, bool pull_up)
+{
+    assert(pin <= HW_GPIO_MAX);
+
+    /*
+     * Stop driving before enabling the input path, not after. A pin left as an
+     * output from an earlier configuration would otherwise be read back as its own
+     * output level for the instant in between — a reading that looks perfectly
+     * plausible and says nothing about what is on the other end of the wire.
+     */
+    hw_reg_write(GPIO_ENABLE_W1TC_REG, 1u << pin);
+
+    configure_pad(pin, true, pull_up);
+
+    /* Push-pull rather than open-drain, in case the pin was left otherwise. With
+     * the output disabled this changes nothing electrically; it leaves the pin in
+     * the state hw_gpio_output_init would find rather than one it would have to
+     * undo. */
+    hw_reg_clear_bits(PIN_REG(pin), 1u << GPIO_PIN0_PAD_DRIVER_S);
+}
+
+bool hw_gpio_read(uint32_t pin)
+{
+    assert(pin <= HW_GPIO_MAX);
+
+    /*
+     * GPIO_IN_REG carries what the pads are actually at, which is not the same as
+     * GPIO_OUT_REG: a pin held low by something stronger than this chip reads low
+     * here while the output latch still says high. On a sense line that difference
+     * is the entire measurement.
+     */
+    return (hw_reg_read(GPIO_IN_REG) & (1u << pin)) != 0u;
+}
+
 void hw_gpio_open_drain_init(uint32_t pin, uint32_t out_signal, uint32_t in_signal,
                              bool pull_up)
 {
