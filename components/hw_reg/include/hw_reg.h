@@ -40,6 +40,14 @@ static inline void hw_reg_write(uint32_t addr, uint32_t value)
  * Read-modify-write, and therefore not safe against concurrent access to the same
  * register. Where the hardware offers a write-1-to-set register, use that instead:
  * it turns the same intent into a single store that cannot lose an update.
+ *
+ * In this firmware that warning has exactly one place it bites, and it is worth
+ * naming so the rest is not read as luck. Every register these drivers touch is
+ * owned by one peripheral and driven by one component — except PERIP_CLK_EN0 and
+ * PERIP_RST_EN0, which hold a bit per peripheral and are therefore shared with every
+ * other bring-up on the chip, ESP-IDF's included. Those two are reached through
+ * periph_module_enable() and periph_module_reset() in hw_i2c.c, because a lock of our
+ * own would not be the lock the other writer takes.
  */
 static inline void hw_reg_set_bits(uint32_t addr, uint32_t bits)
 {
