@@ -51,3 +51,43 @@
  * to answer, since a display redraw is the one thing here that moves real data.
  */
 #define BOARD_I2C_HZ 100000u
+
+/**
+ * @brief Optocoupler driving the front-panel PWR_BTN header.
+ *
+ * @warning Provisional. These two pins have not been confirmed against a board
+ * with the header wired to it. They are chosen rather than measured: GPIO3 and
+ * GPIO4 are brought out on this module, adjacent on the pad row, and clear of
+ * everything already spoken for — GPIO8 is the status LED and a strapping pin,
+ * GPIO2 and GPIO9 are the other two strapping pins, GPIO5 and GPIO6 carry the
+ * display's I²C, GPIO18 and GPIO19 are the native USB pair that the console and
+ * the flasher both arrive on, and GPIO11 through GPIO17 are the module's SPI
+ * flash. Bring-up confirms or replaces them, and this file is the only place that
+ * has to change.
+ *
+ * Active high, so that the pin's reset state is the safe one. A pad leaves reset
+ * as a high-impedance input, which with the opto's LED pulled down is the button
+ * not pressed. Active low would make every reset a keypress.
+ */
+#define BOARD_POWER_BUTTON_GPIO 3u
+
+/** @brief The level that closes the optocoupler, and so presses the button. */
+#define BOARD_POWER_BUTTON_PRESSED_LEVEL true
+
+/**
+ * @brief Divider sensing the front-panel PWR_LED header.
+ *
+ * @warning Provisional in the same way as ::BOARD_POWER_BUTTON_GPIO.
+ *
+ * No internal pull. The divider defines the level at both ends — the LED anode
+ * sits near the supply rail when the machine is running and near ground when it is
+ * not — and a 45 kΩ pull-up against a divider would shift both readings by an
+ * amount that depends on resistors this file does not know.
+ */
+#define BOARD_POWER_SENSE_GPIO 4u
+
+/** @brief The level the sense pin reads while the machine's power LED is lit.
+ *
+ * True for a divider straight off PWR_LED+. A board that inverts the signal —
+ * through a transistor, or from PWR_LED− — is one constant away from working. */
+#define BOARD_POWER_SENSE_LIT_LEVEL true
