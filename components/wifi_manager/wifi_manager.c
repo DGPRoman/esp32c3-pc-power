@@ -340,7 +340,97 @@ static esp_err_t build_setup_ssid(void)
     return ESP_OK;
 }
 
-esp_err_t wifi_manager_start(void)
+/**
+ * @brief What bringing Wi-Fi up has taken so far, so that failing can give it back.
+ *
+ * Fields are in the order they are acquired, which is the order ::take_down walks
+ * backwards. A flag where there is no handle to keep is not tidiness: the opposite of
+ * esp_wifi_init() is a call with no argument, and there is nothing else to record.
+ */
+typedef struct {
+    bool event_loop;
+    esp_netif_t *ap_netif;
+    esp_netif_t *sta_netif;
+    bool driver;
+    esp_event_handler_instance_t wifi_events;
+    esp_event_handler_instance_t ip_events;
+    bool timer;
+} brought_up_t;
+
+/** @brief Log a step of the teardown that itself failed. */
+static void undo(const char *what, esp_err_t err)
+{
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "cleanup: %s: %s", what, esp_err_to_name(err));
+    }
+}
+
+/**
+ * @brief Give back everything in @p built, in the reverse of the order it was taken.
+ *
+ * Two things are deliberately not here. esp_netif_init() has no working opposite —
+ * ESP-IDF's own header says deinitialisation "is not supported yet" — and the NVS
+ * partition wifi_store_init() opens belongs to the whole firmware, which is still
+ * running and still reading from it.
+ *
+ * Nothing here is reached on the way to a working device, so what it is worth is what
+ * happens after it: the caller is left free to try again, and a retry that ran into
+ * its own leftovers — an event loop that already exists, a netif already attached —
+ * would fail for a reason that has nothing to do with why the first attempt did.
+ */
+static void take_down(brought_up_t *built)
+{
+    if (built->timer) {
+        /* Deleted rather than stopped first: every failure that gets here happens
+         * before anything can arm this timer, and esp_timer_delete refuses a running
+         * one — so a stop would be a call whose only possible answer is a warning. */
+        undo("timer", esp_timer_delete(s_reconnect_timer));
+        s_reconnect_timer = NULL;
+    }
+
+    if (built->ip_events != NULL) {
+        undo("ip handler", esp_event_handler_instance_unregister(
+                               IP_EVENT, IP_EVENT_STA_GOT_IP, built->ip_events));
+    }
+
+    if (built->wifi_events != NULL) {
+        undo("wifi handler", esp_event_handler_instance_unregister(
+                                 WIFI_EVENT, ESP_EVENT_ANY_ID, built->wifi_events));
+    }
+
+    if (built->driver) {
+        /* Stopped before it is freed. Nothing in the sequence below can fail after
+         * esp_wifi_start() as it stands, so this is for the failure added later rather
+         * than for one that is there now: which steps can fail is not something a
+         * teardown should have to be read alongside to be correct. */
+        undo("wifi stop", esp_wifi_stop());
+        undo("wifi deinit", esp_wifi_deinit());
+    }
+
+    /* After the driver is gone, because this is what detaches these from it. Both are
+     * documented no-ops on NULL, which is what an interface never created is. */
+    esp_netif_destroy_default_wifi(built->sta_netif);
+    esp_netif_destroy_default_wifi(built->ap_netif);
+
+    if (built->event_loop) {
+        undo("event loop", esp_event_loop_delete_default());
+    }
+
+    /* Both getters promise an empty string until the setup access point is up, and
+     * after this it is not: the panel drawing a network name nobody can join would be
+     * the one part of this failure the person holding the device could see. */
+    s_setup_ssid[0] = '\0';
+    s_setup_password[0] = '\0';
+}
+
+/**
+ * @brief Bring everything up, recording each piece in @p built as it is taken.
+ *
+ * Separate from ::wifi_manager_start so that a step failing stays a plain early
+ * return and the undoing is written once, at the one place that knows the whole of
+ * what was built.
+ */
+static esp_err_t bring_up(brought_up_t *built)
 {
     esp_err_t err = wifi_store_init();
     if (err != ESP_OK) {
@@ -356,19 +446,22 @@ esp_err_t wifi_manager_start(void)
     if (err != ESP_OK) {
         return err;
     }
+    built->event_loop = true;
 
     /* Creates the interface and, with it, the DHCP server that hands the phone an
      * address on 192.168.4.0/24 with the device at 192.168.4.1. Without a DHCP server
      * the access point associates and then does nothing, which looks like a firmware
      * fault and is not one. */
-    if (esp_netif_create_default_wifi_ap() == NULL) {
+    built->ap_netif = esp_netif_create_default_wifi_ap();
+    if (built->ap_netif == NULL) {
         return ESP_FAIL;
     }
 
     /* esp_wifi_scan_start() only works in WIFI_MODE_STA or WIFI_MODE_APSTA, and the
      * station control block it scans through — and a stored network later connects
      * through — is created from this netif when Wi-Fi starts below. */
-    if (esp_netif_create_default_wifi_sta() == NULL) {
+    built->sta_netif = esp_netif_create_default_wifi_sta();
+    if (built->sta_netif == NULL) {
         return ESP_FAIL;
     }
 
@@ -377,6 +470,7 @@ esp_err_t wifi_manager_start(void)
     if (err != ESP_OK) {
         return err;
     }
+    built->driver = true;
 
     /*
      * Keep the driver's own configuration in RAM. By default esp_wifi mirrors whatever
@@ -391,13 +485,13 @@ esp_err_t wifi_manager_start(void)
     }
 
     err = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                             &on_wifi_event, NULL, NULL);
+                                             &on_wifi_event, NULL, &built->wifi_events);
     if (err != ESP_OK) {
         return err;
     }
 
     err = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_ip_event,
-                                             NULL, NULL);
+                                             NULL, &built->ip_events);
     if (err != ESP_OK) {
         return err;
     }
@@ -410,6 +504,7 @@ esp_err_t wifi_manager_start(void)
     if (err != ESP_OK) {
         return err;
     }
+    built->timer = true;
 
     err = build_setup_ssid();
     if (err != ESP_OK) {
@@ -479,6 +574,21 @@ esp_err_t wifi_manager_start(void)
     }
 
     return ESP_OK;
+}
+
+esp_err_t wifi_manager_start(void)
+{
+    brought_up_t built = {0};
+
+    const esp_err_t err = bring_up(&built);
+    if (err != ESP_OK) {
+        /* Not logged here: the caller has the same error and already says so. All this
+         * has to add is that the failure did not also cost the device an event loop,
+         * two interfaces and a driver that nothing will ever come back for. */
+        take_down(&built);
+    }
+
+    return err;
 }
 
 esp_err_t wifi_manager_join(const char *ssid, const char *password)
