@@ -50,7 +50,7 @@ be added alongside.
    pihome-hub (FastAPI)
          │  HTTP + shared-secret auth, on the LAN
          │  ▲
-         │  ╎  announcement and status polling — planned, not built
+         │  ╎  announcement (device → hub), then polling (hub → device)
          ▼  ╎
    ESP32-C3 ─── optocoupler ──▶ PWR_BTN header   (pulse: on / shutdown)
          │
@@ -61,18 +61,33 @@ be added alongside.
 
 The device runs its own HTTP server rather than polling the hub, so a button press
 takes one request and no waiting. The cost of that direction is that the hub has to
-know where to send it.
+know where to send it, and DHCP means the answer changes.
 
-**Nothing tells it yet.** The device serves its API to anything on the LAN holding
-the shared secret, which today means `curl` or a script; the address it is on is
-shown on the panel once it joins. `pihome-hub` has no outbound HTTP client and no
-device registry, so the two halves of this system do not talk to each other at all.
+**The device tells it.** On boot, and again whenever its address changes, it posts
+its address and its own API key to `POST /v1/devices/{id}/announcements` on the hub.
+The hub then polls `GET /v1/power` on a timer, presenting the key it was given. The
+[contract is the hub's](https://github.com/DGPRoman/pihome-hub/blob/main/docs/devices.md);
+this device is declared there under an id, which is what stops an announcement
+introducing an address nobody chose.
 
-Two mechanisms are planned to close that, and **neither is built**: the device
-announcing its address to the hub on boot and on every change, and the hub polling
-`GET /status` on a timer. Between them, either side going quiet would become a
-detectable event rather than a silent failure. They are the "hub-side integration"
-line in the status list below, and they pair with pihome-hub#20.
+Three things follow from how the hub records an announcement, and they are why the
+schedule is what it is:
+
+- **An announcement clears what the poller had recorded** — the last reading, the
+  last error, and how long this device had been unreachable. So nothing here
+  announces on a timer. Doing that would reset the hub's record of a fault every
+  time it fired, which is the record somebody diagnosing the fault would be reading.
+- **A hub that cannot be reached is retried**, starting at two seconds and backing
+  off to five minutes. It ends by itself; this device just has to still be trying.
+- **A hub that answers "no" waits five minutes from the first refusal.** A `401` or
+  a `404` is somebody's configuration rather than the weather, and the hub counts
+  failed authentication attempts per address — so a device retrying a rejected key
+  every two seconds would lock itself out of the route it needs the moment somebody
+  fixed the key.
+
+None of it is on the path that switches the PC. A hub that is down, misconfigured or
+absent leaves this device answering its own API exactly as it did before there was a
+hub, which is what `curl` and the panel have always talked to.
 
 ## Hardware
 
@@ -172,10 +187,22 @@ be: those need the chip.
 
 ## Configuration
 
-Wi-Fi credentials and the shared secret the hub authenticates with are stored in
-NVS on the device and provisioned at runtime. Nothing secret is compiled into the
-firmware or checked into this repository, which is also what makes the same build
-artefact flashable to more than one unit.
+Wi-Fi credentials, the shared secret the hub authenticates with, and where the hub
+is are all stored in NVS on the device and provisioned at runtime. Nothing secret is
+compiled into the firmware or checked into this repository, which is also what makes
+the same build artefact flashable to more than one unit.
+
+**Pointing it at a hub.** `GET /hub` on the device — linked from the setup page, and
+reachable afterwards with the device's API key — takes three things:
+
+| Field | What it is |
+| --- | --- |
+| `origin` | `http://<address>` with an optional port. An address, never a name: resolving one would need DNS working before this device could say where it is. `https` is refused, because this device terminates no TLS and would be promising a guarantee it cannot keep. |
+| `device_id` | The id this device is declared under in the hub's device file. An id the hub does not know is a `404`, which shows on this page. |
+| `key` | The hub's **device key** — `PIHOME_DEVICE_API_KEY`. Not this device's own key, and not the hub's relay key. |
+
+The page shows whether a key is stored, never the key. Announcing starts within a
+second of saving, and how it went shows on that same page and on the setup page.
 
 ## Status
 
@@ -195,9 +222,9 @@ pages are outside that promise and may change in any release.
 - [x] Authenticated command endpoints
 - [x] Power pulse output, LED sense, power-state machine — written and host-tested;
       the pin numbers are provisional until bring-up
-- [ ] Hub-side integration — the device announcing its address, and the hub polling
-      `GET /status`. Neither exists, and the hub has no outbound HTTP client to
-      build the second half on.
+- [x] Hub-side integration — this device announces its address and its key, and the
+      hub polls `GET /v1/power` with it. Both halves exist; the schedule is
+      host-tested, the wire format is checked against a running hub.
 
 ## License
 
