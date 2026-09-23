@@ -15,7 +15,9 @@
 
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+# CDPATH emptied rather than trusted: a value in the environment makes cd print
+# where it went and land somewhere else, which would silently check the wrong tree.
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 source=$root/main/main.c
 doc=$root/docs/http-api.md
 
@@ -33,6 +35,7 @@ served=$(sed -n 's/.*strcmp(request->target, "\([^"]*\)").*/\1/p' "$source" | so
 # Every path the document names with a method, which is how it names all of them:
 # `GET /v1/power`, `POST /network`. A path mentioned in prose without a method is
 # a reference rather than a definition and does not count.
+# shellcheck disable=SC2016  # The backticks are Markdown's, not a substitution.
 documented=$(
     grep -o '`\(GET\|HEAD\|POST\|PUT\|PATCH\|DELETE\) /[^`]*`' "$doc" |
         sed 's/^`[A-Z]* //; s/`$//' |
