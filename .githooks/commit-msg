@@ -28,8 +28,8 @@ Expected:  type(optional-scope)!: description
 
   type         build chore ci docs feat fix perf refactor revert style test
   scope        lowercase, optional - http_server, device_auth, wifi_manager,
-               wifi_store, hw_gpio, hw_i2c, hw_reg, ssd1306, font5x7,
-               power, main, docs, ci
+               wifi_store, hub_link, hw_gpio, hw_i2c, hw_reg, ssd1306,
+               font5x7, power, main, docs, ci
   !            append to the type or scope for a breaking change
   description  lower case, imperative, no trailing full stop
 
