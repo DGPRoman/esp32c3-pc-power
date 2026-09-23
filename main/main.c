@@ -26,6 +26,7 @@
 #include "freertos/task.h"
 #include "http_fields.h"
 #include "http_server.h"
+#include "hub_link.h"
 #include "hw_gpio.h"
 #include "hw_i2c.h"
 #include "power.h"
@@ -417,7 +418,9 @@ static const char SETUP_PAGE[] =
     "<select name=\"ssid\" required>%s</select>"
     "<input type=\"password\" name=\"password\" placeholder=\"Password (blank if open)\">"
     "<button type=\"submit\">Join</button>"
-    "</form></body></html>";
+    "</form>"
+    "<h2>Hub</h2><p>%s &mdash; <a href=\"/hub\">change</a></p>"
+    "</body></html>";
 
 /**
  * @brief Confirmation shown after a network is saved.
@@ -449,7 +452,7 @@ static void handle_setup_page(http_response_t *response)
     const int written =
         snprintf(response->body, response->body_capacity, SETUP_PAGE,
                  wifi_manager_setup_ssid(), device_auth_api_key(),
-                 esp_app_get_description()->version, s_network_list);
+                 esp_app_get_description()->version, s_network_list, hub_link_status());
 
     if (written < 0 || (size_t)written >= response->body_capacity) {
         /* Truncated output would be a broken page. Reporting a server error says which
@@ -512,6 +515,127 @@ static void handle_join_network(const http_request_t *request, http_response_t *
     response->status = 200;
     response->content_type = "text/html; charset=utf-8";
     response->body_length = (size_t)written;
+}
+
+/**
+ * @brief The page that says where the hub is, and takes a new answer.
+ *
+ * Its own page rather than another section on the setup page, for a reason that is
+ * arithmetic: the setup page renders every network in range, and at the worst case
+ * that list alone is most of the response buffer. Adding a second form to it would
+ * mean the page that provisions this device failing in exactly the crowded radio
+ * environment where somebody is most likely to be standing.
+ *
+ * Reachable after provisioning too, behind the API key like everything else, so
+ * moving this device to a different hub does not mean taking its network away first.
+ */
+static const char HUB_PAGE[] =
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>PC power controller</title><style>"
+    "body{font:16px/1.5 system-ui,-apple-system,sans-serif;margin:0;padding:1.5rem;"
+    "background:#14161a;color:#e8eaed}"
+    "h1{font-size:1.2rem;margin:0 0 .5rem}p{margin:0 0 1.5rem;color:#9aa0a6}"
+    "dt{font-size:.8rem;color:#9aa0a6;text-transform:uppercase;letter-spacing:.05em}"
+    "dd{margin:.15rem 0 1rem;font-family:ui-monospace,monospace;color:#8ab4f8}"
+    "h2{font-size:.9rem;margin:0 0 .5rem;color:#9aa0a6;font-weight:400}"
+    "input,button{width:100%%;box-sizing:border-box;font:inherit;padding:.6rem;"
+    "margin:0 0 .75rem;border-radius:.3rem;border:1px solid #2a2d33;"
+    "background:#1c1f24;color:#e8eaed}"
+    "button{background:#8ab4f8;color:#14161a;border:none;font-weight:600}"
+    "a{color:#8ab4f8}"
+    "</style></head><body><h1>Hub</h1>"
+    "<p>Where this device announces itself, so the hub knows where to poll it.</p>"
+    "<dl><dt>Status</dt><dd>%s</dd>"
+    "<dt>Hub key</dt><dd>%s</dd></dl>"
+    "<h2>Point this device at a hub</h2>"
+    "<form method=\"post\" action=\"/hub\">"
+    "<input name=\"origin\" value=\"%s\" placeholder=\"http://10.0.0.2:5000\" required>"
+    "<input name=\"device_id\" value=\"%s\" placeholder=\"workshop-pc\" required>"
+    "<input type=\"password\" name=\"key\" placeholder=\"The hub's device key\" required>"
+    "<button type=\"submit\">Save</button>"
+    "</form><p><a href=\"/\">Back</a></p></body></html>";
+
+/**
+ * @brief Render ::HUB_PAGE with whatever is stored now.
+ *
+ * The two stored values are escaped even though neither can currently contain a
+ * character that needs it — ::hub_origin_valid and ::hub_device_id_valid see to that.
+ * Escaping anyway is what keeps this page's safety a property of this page, rather
+ * than of a validator in another component that somebody may one day loosen for a
+ * reason that has nothing to do with HTML.
+ *
+ * The key is never rendered, only whether there is one. It is the hub's key, not this
+ * device's, and this page is reachable over the network by anyone holding this
+ * device's key — which is not the same person.
+ */
+static void render_hub_page(http_response_t *response)
+{
+    hub_settings_t settings;
+    hub_link_settings(&settings);
+
+    char origin[HUB_ORIGIN_MAX * 6u + 1u];
+    char device_id[HUB_DEVICE_ID_MAX * 6u + 1u];
+    append_escaped(origin, sizeof(origin), settings.origin);
+    append_escaped(device_id, sizeof(device_id), settings.device_id);
+
+    const char *const key_state = settings.key[0] == '\0' ? "not set" : "set";
+
+    const int written = snprintf(response->body, response->body_capacity, HUB_PAGE,
+                                 hub_link_status(), key_state, origin, device_id);
+
+    /* The key this device holds for the hub is on this stack until the frame is
+     * reused. Wiped rather than left there, the same way the announcement body is. */
+    memset(&settings, 0, sizeof(settings));
+
+    if (written < 0 || (size_t)written >= response->body_capacity) {
+        response->status = 500;
+        return;
+    }
+
+    response->status = 200;
+    response->content_type = "text/html; charset=utf-8";
+    response->body_length = (size_t)written;
+}
+
+/**
+ * @brief Handle a submission of the hub form.
+ *
+ * All three fields are required together. A partial update would mean deciding what a
+ * blank field meant — keep the old value, or clear it — and both answers are wrong
+ * some of the time, on a form where one of the fields is a secret that cannot be
+ * shown back to confirm what is already there.
+ */
+static void handle_save_hub(const http_request_t *request, http_response_t *response)
+{
+    hub_settings_t settings;
+    memset(&settings, 0, sizeof(settings));
+
+    const bool read =
+        http_fields_form_value(request->body, "origin", settings.origin,
+                               sizeof(settings.origin)) == HTTP_FIELD_OK &&
+        http_fields_form_value(request->body, "device_id", settings.device_id,
+                               sizeof(settings.device_id)) == HTTP_FIELD_OK &&
+        http_fields_form_value(request->body, "key", settings.key,
+                               sizeof(settings.key)) == HTTP_FIELD_OK;
+
+    const esp_err_t err = read ? hub_link_save(&settings) : ESP_ERR_INVALID_ARG;
+    memset(&settings, 0, sizeof(settings));
+
+    if (err == ESP_ERR_INVALID_ARG) {
+        /* Which field was wrong is not said. The three rules are on the page this
+         * came from, and a device that reported "the key is too short" would be
+         * reporting on a value it was handed by whoever is asking. */
+        response->status = 400;
+        return;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "hub: %s", esp_err_to_name(err));
+        response->status = 500;
+        return;
+    }
+
+    render_hub_page(response);
 }
 
 /**
@@ -677,6 +801,24 @@ static void on_http_request(const http_request_t *request, http_response_t *resp
         return;
     }
 
+    if (strcmp(request->target, "/hub") == 0) {
+        const bool is_get = strcmp(request->method, "GET") == 0;
+        if (!is_get && strcmp(request->method, "POST") != 0) {
+            response->status = 405;
+            return;
+        }
+        if (!provisioning_open && !authorized(request)) {
+            respond_unauthorized(response);
+            return;
+        }
+        if (is_get) {
+            render_hub_page(response);
+        } else {
+            handle_save_hub(request, response);
+        }
+        return;
+    }
+
     const bool is_power = strcmp(request->target, "/v1/power") == 0;
     const bool is_press = strcmp(request->target, "/v1/power/press") == 0;
     const bool is_hold = strcmp(request->target, "/v1/power/hold") == 0;
@@ -782,6 +924,18 @@ void app_main(void)
         } else {
             ESP_LOGE(TAG, "http: %s", esp_err_to_name(server));
         }
+    }
+
+    /* After Wi-Fi, because it has nothing to do until there is an address, and after
+     * the server, because the page that configures it is one of that server's routes.
+     * A failure here is not fatal for the same reason a failed power_start is not:
+     * this device answers its own API either way, which is what it did before there
+     * was a hub to announce to. */
+    const esp_err_t link = hub_link_start();
+    if (link != ESP_OK) {
+        ESP_LOGE(TAG, "hub: %s", esp_err_to_name(link));
+    } else {
+        ESP_LOGI(TAG, "hub: %s", hub_link_status());
     }
 
     const bool display_ok = (display == HW_I2C_OK) && (wifi == ESP_OK);
