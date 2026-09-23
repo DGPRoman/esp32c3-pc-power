@@ -178,6 +178,20 @@ the credentials, and returns a page showing the API key. A name or password too
 long to store is `400`. Joining is a separate step from saving, so a `200` here
 means the credentials are stored, not that the network was reached.
 
+`GET /hub` returns the page that says where this device announces itself, showing
+the stored origin and device id, whether a hub key is stored, and how the last
+announcement went. The key itself is never rendered — only whether there is one.
+
+`POST /hub` takes that form back as `application/x-www-form-urlencoded` with
+`origin`, `device_id` and `key`, all three required together. Anything this device
+would not post to is `400`, without saying which field it was: the three rules are
+on the page the form came from, and the values were supplied by whoever is asking.
+A `200` means the settings are stored and announcing has started, not that the hub
+has answered — `GET /hub` is where that shows up.
+
+Both are reachable after provisioning, behind the API key like everything else, so
+moving this device to a different hub does not mean taking its network away first.
+
 ## Status codes in one place
 
 | Code | Raised by | Meaning |
@@ -189,7 +203,7 @@ means the credentials are stored, not that the network was reached.
 | `404` | handler | No such path. |
 | `405` | handler | Path exists, method does not. |
 | `409` | handler | A power request was refused; nothing changed. |
-| `413` | server | Body over 512 bytes. |
+| `413` | server | Body over 1024 bytes. |
 | `431` | server | Head over 2048 bytes. |
 | `500` | handler | The response would not fit its buffer, or saving credentials failed. |
 | `501` | server | `Transfer-Encoding` present. |

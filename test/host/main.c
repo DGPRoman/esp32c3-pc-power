@@ -16,6 +16,7 @@ void test_http_fields(void);
 void test_hw_i2c_timing(void);
 void test_wifi_field(void);
 void test_power_machine(void);
+void test_hub_announce(void);
 
 int main(void)
 {
@@ -26,6 +27,7 @@ int main(void)
     test_hw_i2c_timing();
     test_wifi_field();
     test_power_machine();
+    test_hub_announce();
 
     return check_summary();
 }

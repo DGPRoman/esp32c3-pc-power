@@ -39,18 +39,31 @@ extern "C" {
  */
 #define HTTP_REQUEST_HEAD_MAX 2048u
 
-/** @brief Largest request body accepted. A provisioning form is a few hundred bytes. */
-#define HTTP_REQUEST_BODY_MAX 512u
+/**
+ * @brief Largest request body accepted.
+ *
+ * There are two provisioning forms now, and the second one carries a key. Percent
+ * encoding is what decides this rather than the field widths: a key of the longest
+ * accepted length, made entirely of characters a form encodes, is three bytes on the
+ * wire for each one of them. The old 512 covered the network form and would have
+ * turned a long hub key into a request the server dropped.
+ */
+#define HTTP_REQUEST_BODY_MAX 1024u
 
 /**
  * @brief Capacity of the buffer a handler writes its response into.
  *
  * Sized for the provisioning page with a full list of nearby networks rendered into
- * it, the largest thing this device serves — comfortably past that rather than exactly
- * at it, because the margin is cheap and a handler that comes up five bytes short only
- * finds out from a 500 on real hardware.
+ * it, the largest thing this device serves. The arithmetic, so the next person can
+ * check it rather than trust it: sixteen networks at the escaped worst case is 6912
+ * bytes, and the page around them is about 1300 more.
+ *
+ * That came to slightly over the 8192 this used to be. Nothing overran — the page is
+ * built with a bounded snprintf and a truncated one is answered as a 500 — but the
+ * 500 would have arrived exactly where it is least welcome: on the page that
+ * provisions this device, in the crowded radio environment that caused it.
  */
-#define HTTP_RESPONSE_BODY_MAX 8192u
+#define HTTP_RESPONSE_BODY_MAX 10240u
 
 /** @brief The parts of a request a handler is given. */
 typedef struct {
