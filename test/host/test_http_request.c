@@ -82,6 +82,51 @@ static void test_request_line(void)
         CHECK(!parse_request_line());
     }
 
+    /* A line that has not ended is not a line yet. receive_head only returns once
+     * the blank line has arrived, so the firmware never reaches this — it is the one
+     * case that tells the bounded parse apart from a parse that runs to the end of
+     * the buffer, and it is here so that the bound cannot be removed in silence. */
+    given_head("GET /status HTTP/1.1");
+    CHECK(!parse_request_line());
+
+    /* A request line with no second space ends at its CRLF and is refused there.
+     * Searching on into the headers would find the next space anywhere in the head
+     * and call everything before it the target, CRLF included. */
+    given_head("GET /a\r\nHost: b\r\n\r\n");
+    CHECK(!parse_request_line());
+
+    given_head("GET\r\nHost: b\r\n\r\n");
+    CHECK(!parse_request_line());
+
+    /* The same shape one line further in: the space that would be found is in a
+     * header value, and the method itself is already unterminated. */
+    given_head("GET /a\r\nAccept: */*\r\n\r\n");
+    CHECK(!parse_request_line());
+
+    /* Both are written to the console log, so both are held to the characters they
+     * are allowed to be rather than passed through as received. A bare LF stays
+     * inside the request line as bounded above, which is why it is checked here. */
+    given_head("GET /a\nb HTTP/1.1\r\n\r\n");
+    CHECK(!parse_request_line());
+
+    given_head("GET /a\033[2J HTTP/1.1\r\n\r\n");
+    CHECK(!parse_request_line());
+
+    given_head("GET /a\177 HTTP/1.1\r\n\r\n");
+    CHECK(!parse_request_line());
+
+    given_head("G\033T /a HTTP/1.1\r\n\r\n");
+    CHECK(!parse_request_line());
+
+    given_head("get /a HTTP/1.1\r\n\r\n");
+    CHECK(!parse_request_line());
+
+    /* The printable range is admitted whole: a target is percent-encoded by the
+     * time it arrives, and refusing punctuation here would refuse query strings. */
+    given_head("GET /a~!$&'()*+,;=:@%20 HTTP/1.1\r\n\r\n");
+    CHECK(parse_request_line());
+    CHECK_EQ_STR(s_target, "/a~!$&'()*+,;=:@%20");
+
     /* Exactly at the limit is accepted — the boundary the test above brackets. */
     {
         char target[TARGET_MAX + 1u];

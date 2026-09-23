@@ -31,6 +31,13 @@ in a bare LF is never recognised as complete: it is not answered at all, and the
 connection closes when the three-second receive timeout expires. This is exactly
 the request that comes of typing one into `netcat` by hand.
 
+The request line is read as one line and nothing beyond it. The method is upper-case
+letters — this device answers `GET` and `POST`, and a method spelled any other way is
+`400` rather than `405`. The target is printable characters other than space, which is
+what a target already is once it has been percent-encoded. Anything else in either is
+`400`, because both are written to the device's console log and a log line should be
+one line.
+
 `401` carries a JSON body. Every other error status carries none — `Content-Length:
 0` and a `Content-Type` of `text/plain; charset=utf-8`, which describes the nothing
 that follows it. The status is the whole of the answer.
@@ -40,8 +47,8 @@ Limits, all enforced before a handler sees anything:
 | | Limit | Exceeded |
 | --- | --- | --- |
 | Request head | 2048 bytes | `431` |
-| Request body | 512 bytes | `413` |
-| Response body | 8192 bytes | `500` |
+| Request body | 1024 bytes | `413` |
+| Response body | 10240 bytes | `500` |
 
 `Transfer-Encoding` is answered `501` rather than interpreted. Chunked framing is
 not implemented, and a message carrying both it and `Content-Length` is the one

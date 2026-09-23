@@ -228,18 +228,60 @@ static head_result_t receive_head(int sock, size_t *head_length, size_t *body_in
 }
 
 /**
+ * @brief True for a character a method may be spelled with.
+ *
+ * Narrower than HTTP, which allows digits and some punctuation in a method token.
+ * This server answers GET and POST, so a method outside these letters is refused
+ * either way; the narrow rule is the one whose whole range fits in the expression.
+ */
+static bool method_char(char c)
+{
+    return c >= 'A' && c <= 'Z';
+}
+
+/**
+ * @brief True for a character a request target may contain.
+ *
+ * The printable range without space, which is what a target consists of by the time
+ * it is on the wire: everything outside it has been percent-encoded, and the space
+ * is the delimiter being searched for. Written as a range rather than a list so that
+ * query strings and their punctuation are admitted without enumerating them.
+ *
+ * `char` is signed on the ESP32-C3, so a byte at or above 0x80 reads as negative
+ * here and the lower bound refuses it without a separate test.
+ */
+static bool target_char(char c)
+{
+    return c > 0x20 && c < 0x7F;
+}
+
+/**
  * @brief Copy the method and target out of the request line.
  *
  * Copied rather than carved out of the buffer in place, because the headers still have
  * to be parsed afterwards and writing terminators into the middle of them would make
  * the order of these two steps load-bearing for no benefit.
  *
+ * Both searches are bounded to the first CRLF. The request line is the only place a
+ * method and a target can come from, and searching past it means a line with no second
+ * space takes its target from the next space anywhere in the head — carrying the CRLF
+ * and part of a header into a value that is then copied out and logged.
+ *
+ * Both values are then checked character by character. They reach the console log, and
+ * the log is the only account of what this board did once it is away from a debugger;
+ * a line in it should be one line, and should say what arrived.
+ *
  * The HTTP version is read past and ignored. There is nothing this server would do
  * differently for 1.0, and it closes every connection regardless.
  */
 static bool parse_request_line(void)
 {
-    const char *method_end = strchr(s_head, ' ');
+    const char *line_end = strstr(s_head, "\r\n");
+    if (line_end == NULL) {
+        return false;
+    }
+
+    const char *method_end = memchr(s_head, ' ', (size_t)(line_end - s_head));
     if (method_end == NULL) {
         return false;
     }
@@ -249,8 +291,10 @@ static bool parse_request_line(void)
         return false;
     }
 
+    /* method_end is before line_end, so this is at most line_end and the length
+     * below cannot underflow. */
     const char *target_start = method_end + 1;
-    const char *target_end = strchr(target_start, ' ');
+    const char *target_end = memchr(target_start, ' ', (size_t)(line_end - target_start));
     if (target_end == NULL) {
         return false;
     }
@@ -258,6 +302,18 @@ static bool parse_request_line(void)
     const size_t target_length = (size_t)(target_end - target_start);
     if (target_length == 0 || target_length > TARGET_MAX) {
         return false;
+    }
+
+    for (size_t i = 0; i < method_length; i++) {
+        if (!method_char(s_head[i])) {
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < target_length; i++) {
+        if (!target_char(target_start[i])) {
+            return false;
+        }
     }
 
     memcpy(s_method, s_head, method_length);
