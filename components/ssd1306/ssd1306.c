@@ -105,6 +105,11 @@ hw_i2c_result_t ssd1306_init(void)
          * panel's 40 rows are bonded to the controller's first 40, so the vertical
          * mapping is direct and needs no offset. */
         CMD_SET_DISPLAY_OFFSET, 0x00,
+        /* The start line is encoded in the low six bits of the opcode itself, so
+         * 0x40 is line 0 and 0x47 would be line 7. The `| 0x00` is redundant as
+         * arithmetic and is the point as documentation: it shows where the line
+         * number goes, which is how the datasheet writes it. */
+        /* cppcheck-suppress badBitmaskCheck */
         CMD_SET_START_LINE | 0x00,
 
         /* The charge pump makes the panel's ~7 V from 3V3. This module has no

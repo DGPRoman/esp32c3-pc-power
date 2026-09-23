@@ -126,6 +126,7 @@ keypress on the machine inside the case.
 | `docs/` | [The HTTP contract](docs/http-api.md) |
 | `test/host/` | Host tests for everything that does not need the chip |
 | `test/check-contract.sh` | Fails if a route is served without being documented, or the reverse |
+| `test/check-static.sh` | cppcheck over every C file; any finding fails |
 | `sdkconfig.defaults` | Tracked build configuration |
 
 ## Implementation notes
@@ -183,7 +184,19 @@ never whether the server asks it — removing the `Transfer-Encoding` refusal le
 every parser test passing.
 
 Everything that touches a peripheral is not covered here and is not pretended to
-be: those need the chip.
+be: those need the chip. What partly answers that is static analysis, which reads
+the code that cannot be run:
+
+```sh
+sh test/check-static.sh
+```
+
+cppcheck over every C file in the repository, at its exhaustive setting, with any
+finding failing the run. The firmware build already refuses a compiler warning;
+this follows a value across branches instead, which is the class of defect a
+warning cannot see and which here sits mostly in the drivers no test reaches. A
+finding that is deliberate is answered next to the line with the reason, not in a
+list somewhere else.
 
 ## Configuration
 
