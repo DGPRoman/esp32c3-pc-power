@@ -33,8 +33,30 @@ jobs:
         # written down later. Paths only — the fields and statuses are prose.
         run: sh test/check-contract.sh
 
-      - name: Lint the contract check
-        run: shellcheck --severity=style test/check-contract.sh
+      - name: Lint the shell checks
+        run: shellcheck --severity=style test/check-contract.sh test/check-static.sh
+
+  static-analysis:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install cppcheck
+        # From the runner's archive, unpinned, the same way this workflow and the
+        # hub's take shellcheck. The cost is that a cppcheck release can fail a
+        # build nothing changed in; the alternative is a pinned version that stops
+        # learning new checks, which for an analyser is the wrong way round.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends cppcheck
+          cppcheck --version
+
+      - name: Analyse
+        # The firmware build already fails on any compiler warning. This follows a
+        # value across branches instead, which is the class of defect a warning
+        # cannot see and no test here can reach without a radio and a panel.
+        run: sh test/check-static.sh
 
   firmware:
     name: Firmware build
